@@ -12,7 +12,7 @@ import (
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/clock"
@@ -193,8 +193,8 @@ func newObjectForHealthCheck(log logr.Logger, scheme *runtime.Scheme, gvk schema
 			return nil, err
 		}
 
-		log.V(1).Info("Falling back to metadata-only object for health checks (not registered in the target scheme)", "groupVersionKind", gvk, "err", err.Error())
-		obj := &metav1.PartialObjectMetadata{}
+		log.V(1).Info("Falling back to unstructured object for health checks (not registered in the target scheme)", "groupVersionKind", gvk, "err", err.Error())
+		obj := new(unstructured.Unstructured)
 		obj.SetGroupVersionKind(gvk)
 		return obj, nil
 	}

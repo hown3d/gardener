@@ -16,6 +16,7 @@ import (
 	apiextensionsinstall "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/install"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	vpaautoscalingv1 "k8s.io/autoscaler/vertical-pod-autoscaler/pkg/apis/autoscaling.k8s.io/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -90,6 +91,8 @@ func CheckHealth(obj client.Object) (bool, error) {
 		return true, health.CheckCertificate(o)
 	case *certv1alpha1.Issuer:
 		return true, health.CheckCertificateIssuer(o)
+	case *unstructured.Unstructured:
+		return true, health.CheckUnstructured(o)
 	}
 
 	return false, nil

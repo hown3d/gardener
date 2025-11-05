@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -95,8 +95,8 @@ func (r *Reconciler) AddToManager(mgr manager.Manager, sourceCluster, targetClus
 			return nil
 		}
 
-		_, metadataOnly := obj.(*metav1.PartialObjectMetadata)
-		c.GetLogger().Info("Adding new watch for GroupVersionKind", "groupVersionKind", gvk, "metadataOnly", metadataOnly)
+		_, ok := obj.(*unstructured.Unstructured)
+		c.GetLogger().Info("Adding new watch for GroupVersionKind", "groupVersionKind", gvk, "unstructured", ok)
 
 		if err := c.Watch(source.Kind(
 			targetCluster.GetCache(),

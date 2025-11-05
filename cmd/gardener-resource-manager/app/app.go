@@ -197,6 +197,7 @@ func run(ctx context.Context, log logr.Logger, cfg *resourcemanagerconfigv1alpha
 			opts.Cache.SyncPeriod = &cfg.TargetClientConnection.CacheResyncPeriod.Duration
 
 			opts.Client.Cache = &client.CacheOptions{
+				Unstructured: true,
 				DisableFor: []client.Object{
 					&corev1.Event{},
 					&eventsv1beta1.Event{},
