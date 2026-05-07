@@ -95,11 +95,13 @@ func (b *Botanist) ToAdvertisedAddresses(ctx context.Context) ([]gardencorev1bet
 	}
 	addresses = append(addresses, ingressItems...)
 
-	virtualServiceItems, err := b.GetVirtualServiceAdvertisedEndpoints(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get virtual service advertised endpoints: %w", err)
+	if !b.Shoot.IsSelfHosted() {
+		virtualServiceItems, err := b.GetVirtualServiceAdvertisedEndpoints(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get virtual service advertised endpoints: %w", err)
+		}
+		addresses = append(addresses, virtualServiceItems...)
 	}
-	addresses = append(addresses, virtualServiceItems...)
 
 	return addresses, nil
 }

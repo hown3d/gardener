@@ -119,12 +119,17 @@ func run(ctx context.Context, opts *Options) error {
 			Fn:           flow.TaskFn(b.EnsureCustomResourceDefinitionsReady).RetryUntilTimeout(time.Second, time.Minute),
 			Dependencies: flow.NewTaskIDs(reconcileCustomResourceDefinitions),
 		})
+		updateAdvertisedAddresses = g.Add(flow.Task{
+			Name:         "Ensuring advertised addresses for the Shoot",
+			Fn:           b.UpdateAdvertisedAddresses,
+			Dependencies: flow.NewTaskIDs(ensureCustomResourceDefinitionsReady),
+		})
 		reconcileClusterResource = g.Add(flow.Task{
 			Name: "Reconciling extensions.gardener.cloud/v1alpha1.Cluster resource",
 			Fn: func(ctx context.Context) error {
 				return gardenerextensions.SyncClusterResourceToSeed(ctx, b.SeedClientSet.Client(), b.Shoot.ControlPlaneNamespace, b.Shoot.GetInfo(), b.Shoot.CloudProfile, b.Seed.GetInfo())
 			},
-			Dependencies: flow.NewTaskIDs(ensureCustomResourceDefinitionsReady),
+			Dependencies: flow.NewTaskIDs(ensureCustomResourceDefinitionsReady, updateAdvertisedAddresses),
 		})
 		initializeSecretsManagement = g.Add(flow.Task{
 			Name:         "Initializing internal state of Gardener secrets manager",
