@@ -1174,6 +1174,8 @@ profiles:
       kustomize:
         paths:
           - dev-setup/gardenadm/resources/overlays/unmanaged-infra
+        buildArgs: 
+          - --load-restrictor=LoadRestrictionsNone
     patches:
       # remove machine-controller-manager-provider-local image (not needed in unmanaged infra scenario)
       - op: test
@@ -1181,8 +1183,20 @@ profiles:
         value: local-skaffold/machine-controller-manager-provider-local
       - op: remove
         path: /build/artifacts/4
+  - name: unmanaged-infra-cilium
+    manifests:
+      kustomize:
+        paths:
+          - dev-setup/gardenadm/resources/overlays/unmanaged-infra-cilium
+        buildArgs: 
+          - --load-restrictor=LoadRestrictionsNone
   - name: managed-infra
     manifests:
       kustomize:
         paths:
           - dev-setup/gardenadm/resources/overlays/managed-infra
+  - name: managed-infra-cilium
+    manifests:
+      kustomize:
+        paths:
+          - dev-setup/gardenadm/resources/overlays/managed-infra-cilium
