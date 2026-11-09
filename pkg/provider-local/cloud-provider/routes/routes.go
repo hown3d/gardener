@@ -8,18 +8,24 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/gardener/gardener/pkg/client/kubernetes"
 	cloudproviderv1alpha1 "github.com/gardener/gardener/pkg/provider-local/cloud-provider/api/v1alpha1"
 	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/helper"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/exec"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var ClusterCIDR netip.Prefix
@@ -33,6 +39,9 @@ type Provider struct {
 	// where the shoot machine pods run. This is only set if the cloud-controller-manager-local is running for a shoot
 	// cluster, not for the kind cluster itself.
 	RuntimeClient client.Client
+
+	// DockerClient is the client connected to the host's Docker socket.
+	DockerClient *dockerclient.Client
 
 	PodExecutor kubernetes.PodExecutor
 }
@@ -117,11 +126,37 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 		}
 		cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", nodeInternalIP.String(), "dev", "eth0", "onlink"}
 		log.Info("modifyRoute", "cmd", strings.Join(cmd, " "))
-		_, _, err = p.executeCommandInContainer(ctx, pod.Name, cmd)
+		_, _, err = p.executeCommandInPod(ctx, pod.Name, cmd)
 		if err != nil {
 			routeErr = errors.Join(routeErr, fmt.Errorf("adding route in pod %s: %w", pod.Name, err))
 		}
+
+		nodeName := pod.Spec.NodeName
+		containerID, err := p.containerIDByName(ctx, nodeName)
+		if err != nil {
+			return err
+		}
+
+		podLinkIndex, err := p.machinePodLinkIndex(ctx, pod.Name)
+		if err != nil {
+			return fmt.Errorf("getting machine pod link index: %w", err)
+		}
+
+		machinePodifName, err := p.machinePodLinkName(ctx, containerID, podLinkIndex)
+		if err != nil {
+			return fmt.Errorf("getting machine pod link name: %w", err)
+		}
+
+		if err := p.ensureIPRule(ctx, containerID, machinePodifName); err != nil {
+			return fmt.Errorf("ensuring ip rule on kind node %s: %w", nodeName, err)
+		}
+
+		if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, nodeInternalIP); err != nil {
+			return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
+		}
+
 	}
+
 	return routeErr
 }
 
@@ -219,6 +254,84 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 	return cloudproviderRoutes, nil
 }
 
+// machinePodLinkIndex returns the link index of the machine pods veth pair
+func (p *Provider) machinePodLinkIndex(ctx context.Context, podName string) (int, error) {
+	stdout, _, err := p.executeCommandInPod(ctx, podName, []string{"ip", "--json", "link", "show", "eth0"})
+	if err != nil {
+		return 0, err
+	}
+
+	ipLinks := []ipLink{}
+	if err := json.NewDecoder(stdout).Decode(&ipLinks); err != nil {
+		return 0, err
+	}
+
+	if len(ipLinks) != 1 {
+		return 0, fmt.Errorf("no ip route found for eth0")
+	}
+
+	return ipLinks[0].LinkIndex, nil
+}
+
+// machinePodLinkName gets the link name of the machine's pod veth pair on the node.
+// nodeContainerID is the id of the docker container running as node in the kind cluster.
+func (p *Provider) machinePodLinkName(ctx context.Context, nodeContainerID string, podLinkIndex int) (string, error) {
+	stdout, _, err := p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "--json", "link", "show"})
+	if err != nil {
+		return "", err
+	}
+	ipLinks := []ipLink{}
+	if err := json.NewDecoder(stdout).Decode(&ipLinks); err != nil {
+		return "", err
+	}
+	var ifName string
+	for _, link := range ipLinks {
+		if link.IfIndex == podLinkIndex {
+			ifName = link.IfName
+			break
+		}
+	}
+
+	if ifName == "" {
+		return "", fmt.Errorf("ifname for link index %d not found", podLinkIndex)
+	}
+	return ifName, nil
+}
+
+// ensureIPRoute ensures an ip rule in the outer node's container for each machine pod to lookup the correct routing table
+func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, machinePodIfName string) error {
+	stdout, _, err := p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "--json", "rule", "show", "iif", machinePodIfName, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
+	if err != nil {
+		return err
+	}
+
+	rules := []ipRule{}
+	if err := json.NewDecoder(stdout).Decode(&rules); err != nil {
+		return err
+	}
+
+	// TODO: validate table ID is correct
+	if len(rules) != 0 {
+		return nil
+	}
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "rule", "add", "iif", machinePodIfName, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
+	if err != nil {
+		return err
+	}
+	return nil
+
+}
+
+// ensureIPRoute ensures an ip route in the outer node's container for each machine pod
+func (p *Provider) ensureIPRoute(ctx context.Context, op op, nodeContainerID, destinationCIDR string, nodeIP netip.Addr) error {
+	cmd := []string{"ip", "route", string(op), destinationCIDR, "via", nodeIP.String(), "table", strconv.Itoa(p.Config.Routes.TableID)}
+	_, _, err := p.executeCommandInContainer(ctx, nodeContainerID, cmd)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
 	podList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.Config.RuntimeCluster.Namespace)
 	if err != nil {
@@ -236,6 +349,17 @@ func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
 	return m, nil
 }
 
+type ipLink struct {
+	IfIndex   int    `json:"ifindex"`
+	LinkIndex int    `json:"link_index"`
+	IfName    string `json:"ifname"`
+}
+
+type ipRule struct {
+	IIF   string `json:"iif"`
+	Table string `json:"table"`
+}
+
 type ipRoute struct {
 	Dest    string `json:"dst"`
 	Gateway string `json:"gateway"`
@@ -244,7 +368,7 @@ type ipRoute struct {
 
 func (p *Provider) listIPRoutes(ctx context.Context, podName string) ([]ipRoute, error) {
 	cmd := []string{"ip", "--json", "route", "list"}
-	stdout, _, err := p.executeCommandInContainer(ctx, podName, cmd)
+	stdout, _, err := p.executeCommandInPod(ctx, podName, cmd)
 	if err != nil {
 		return nil, fmt.Errorf("get route list of container: %w", err)
 	}
@@ -258,7 +382,8 @@ func (p *Provider) listIPRoutes(ctx context.Context, podName string) ([]ipRoute,
 	return routes, nil
 }
 
-func (p *Provider) executeCommandInContainer(ctx context.Context, podName string, cmd []string) (io.Reader, io.Reader, error) {
+func (p *Provider) executeCommandInPod(ctx context.Context, podName string, cmd []string) (io.Reader, io.Reader, error) {
+	klog.V(1).Infof("running command %v on pod %s", cmd, podName)
 	stdout, stderr, err := p.PodExecutor.Execute(ctx, p.Config.RuntimeCluster.Namespace, podName, "", cmd...)
 	if err != nil {
 		if exitErr, ok := errors.AsType[exec.CodeExitError](err); ok && exitErr.Exited() {
@@ -267,6 +392,63 @@ func (p *Provider) executeCommandInContainer(ctx context.Context, podName string
 		return nil, nil, err
 	}
 	return stdout, stderr, nil
+}
+
+func (p *Provider) executeCommandInContainer(ctx context.Context, containerID string, cmd []string) (io.Reader, io.Reader, error) {
+	klog.V(1).Infof("running command %v on container %s", cmd, containerID)
+	res, err := p.DockerClient.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("exec create: %w", err)
+	}
+
+	attachRes, err := p.DockerClient.ContainerExecAttach(ctx, res.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return nil, nil, fmt.Errorf("exec attach: %w", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	_, err = stdcopy.StdCopy(&stdout, &stderr, attachRes.Reader)
+	if err != nil {
+		return nil, nil, fmt.Errorf("demultiplex output: %w", err)
+	}
+
+	inspectRes, err := p.DockerClient.ContainerExecInspect(ctx, res.ID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("exec inspect: %w", err)
+	}
+	if inspectRes.ExitCode != 0 {
+		return nil, nil, processError{code: inspectRes.ExitCode, stderr: &stderr, stdout: &stdout}
+	}
+	return &stdout, &stderr, nil
+}
+
+func (p *Provider) containerIDByName(ctx context.Context, name string) (string, error) {
+	filters := filters.NewArgs(filters.Arg("name", name))
+	containers, err := p.DockerClient.ContainerList(ctx, container.ListOptions{
+		Filters: filters,
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(containers) == 0 {
+		return "", fmt.Errorf("container list returned 0 items")
+	}
+	if len(containers) == 1 {
+		return containers[0].ID, nil
+	}
+	for _, c := range containers {
+		for _, n := range c.Names {
+			n, _ := strings.CutPrefix(n, "/")
+			if n == name {
+				return c.ID, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("container with name %s not found", name)
 }
 
 type processError struct {

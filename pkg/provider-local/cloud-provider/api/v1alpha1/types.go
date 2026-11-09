@@ -23,6 +23,8 @@ type CloudProviderConfig struct {
 	RuntimeCluster *RuntimeCluster `json:"runtimeCluster,omitempty"`
 	// LoadBalancer contains the configuration for the service controller of cloud-controller-manager-local.
 	LoadBalancer LoadBalancer `json:"loadBalancer"`
+
+	Routes Routes `json:"routes"`
 }
 
 // RuntimeCluster configures how cloud-controller-manager-local connects to the runtime cluster (seed) of the shoot
@@ -41,4 +43,8 @@ type RuntimeCluster struct {
 type LoadBalancer struct {
 	// Image is the envoy container image used for starting load balancer containers.
 	Image string `json:"image"`
+}
+
+type Routes struct {
+	TableID int `json:"tableID"`
 }

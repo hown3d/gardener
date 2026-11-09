@@ -13,6 +13,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 
+	"github.com/cespare/xxhash/v2"
 	extensionscontroller "github.com/gardener/gardener/extensions/pkg/controller"
 	"github.com/gardener/gardener/extensions/pkg/controller/controlplane/genericactuator"
 	extensionssecretsmanager "github.com/gardener/gardener/extensions/pkg/util/secret/manager"
@@ -172,10 +173,16 @@ func (vp *valuesProvider) GetConfigChartValues(
 		}
 	}
 
+	hash64 := xxhash.Sum64([]byte(cluster.Shoot.UID))
+	hash32 := uint32(hash64 ^ (hash64 >> 32))
+
 	return map[string]any{
 		"runtimeCluster": runtimeCluster,
 		"loadBalancer": map[string]any{
 			"image": config.LoadBalancer.Image,
+		},
+		"routes": map[string]any{
+			"tableID": hash32,
 		},
 	}, nil
 }
