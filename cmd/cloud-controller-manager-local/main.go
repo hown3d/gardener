@@ -8,6 +8,7 @@
 package main
 
 import (
+	"net/netip"
 	"os"
 
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -24,6 +25,7 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/provider"
+	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/routes"
 )
 
 func main() {
@@ -51,6 +53,8 @@ func cloudInitializer(config *config.CompletedConfig) cloudprovider.Interface {
 	if cloud == nil {
 		klog.Fatalf("Cloud provider is nil")
 	}
+
+	routes.ClusterCIDR = netip.MustParsePrefix(config.ComponentConfig.KubeCloudShared.ClusterCIDR)
 
 	if !cloud.HasClusterID() {
 		if config.ComponentConfig.KubeCloudShared.AllowUntaggedCloud {
