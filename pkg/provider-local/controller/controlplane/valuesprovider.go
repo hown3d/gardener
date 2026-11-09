@@ -208,6 +208,8 @@ func (vp *valuesProvider) GetControlPlaneChartValues(
 			"podLabels": map[string]any{
 				v1beta1constants.LabelPodMaintenanceRestart: "true",
 			},
+			// FIXME: pointer deref and handle slice. Flag accepts only a single range
+			"clusterCIDR":       cluster.Shoot.Status.Networking.Pods[0],
 			"priorityClassName": v1beta1constants.PriorityClassNameShootControlPlane300,
 			"server": map[string]any{
 				"tlsSecret":       serverSecret.Name,

@@ -12,6 +12,8 @@ leaderElection: true
 healthProbes:
   enable: true
 
+clusterCIDR: ""
+
 server:
   port: 10258
   tlsSecret: ""

@@ -104,9 +104,12 @@ spec:
         # The node controllers are only supported for shoot clusters with managed infrastructure, where shoot nodes are
         # backed by machine pods in the runtime cluster. They are disabled for the kind cluster itself and for
         # self-hosted shoots with unmanaged infrastructure (nodes are kind containers).
-        - --controllers=service,cloud-node,cloud-node-lifecycle
+        - --controllers=service,cloud-node,cloud-node-lifecycle{{- if .Values.clusterCIDR }},node-route-controller{{end}}
         {{- else }}
         - --controllers=service
+        {{- end }}
+        {{- if .Values.clusterCIDR }}
+        - --cluster-cidr={{ .Values.clusterCIDR }}
         {{- end }}
         - --concurrent-service-syncs=10
         - --use-service-account-credentials
