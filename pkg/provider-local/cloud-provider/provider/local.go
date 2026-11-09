@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/tools/clientcmd"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -20,6 +21,7 @@ import (
 	cloudproviderv1alpha1 "github.com/gardener/gardener/pkg/provider-local/cloud-provider/api/v1alpha1"
 	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/instances"
 	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/loadbalancer"
+	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/routes"
 )
 
 // Name is the name of the local cloud provider as specified in the cloud controller manager's --cloud-provider flag.
@@ -90,6 +92,22 @@ func New(cfg *cloudproviderv1alpha1.CloudProviderConfig) (cloudprovider.Interfac
 			Config:        cfg,
 			RuntimeClient: runtimeClient,
 		}
+
+		clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+			&clientcmd.ClientConfigLoadingRules{ExplicitPath: ptr.Deref(cfg.RuntimeCluster.Kubeconfig, "")},
+			&clientcmd.ConfigOverrides{},
+		)
+
+		config, err := clientConfig.ClientConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		cloudProvider.routes = &routes.Provider{
+			Config:        cfg,
+			RuntimeClient: runtimeClient,
+			PodExecutor:   kubernetes.NewPodExecutor(config),
+		}
 	}
 
 	return cloudProvider, nil
@@ -118,6 +136,7 @@ func createRuntimeClient(cfg *cloudproviderv1alpha1.RuntimeCluster) (client.Clie
 type Local struct {
 	loadBalancer *loadbalancer.Provider
 	instances    *instances.Provider
+	routes       *routes.Provider
 }
 
 // ProviderName returns the cloud provider ID. Selected by the --cloud-provider flag of cloud-controller-manager.
@@ -164,4 +183,4 @@ func (l *Local) Zones() (cloudprovider.Zones, bool) { return nil, false }
 func (l *Local) Clusters() (cloudprovider.Clusters, bool) { return nil, false }
 
 // Routes returns a routes interface along with whether the interface is supported.
-func (l *Local) Routes() (cloudprovider.Routes, bool) { return nil, false }
+func (l *Local) Routes() (cloudprovider.Routes, bool) { return l.routes, true }
