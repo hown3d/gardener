@@ -54,7 +54,9 @@ func cloudInitializer(config *config.CompletedConfig) cloudprovider.Interface {
 		klog.Fatalf("Cloud provider is nil")
 	}
 
-	routes.ClusterCIDR = netip.MustParsePrefix(config.ComponentConfig.KubeCloudShared.ClusterCIDR)
+	if config.ComponentConfig.KubeCloudShared.ClusterCIDR != "" {
+		routes.ClusterCIDR = netip.MustParsePrefix(config.ComponentConfig.KubeCloudShared.ClusterCIDR)
+	}
 
 	if !cloud.HasClusterID() {
 		if config.ComponentConfig.KubeCloudShared.AllowUntaggedCloud {
