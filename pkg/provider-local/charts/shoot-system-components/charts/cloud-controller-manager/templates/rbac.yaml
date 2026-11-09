@@ -55,6 +55,9 @@ rules:
   # Used by the cloud-node and cloud-node-lifecycle controllers. The kube-apiserver bootstraps the
   # system:controller:node-controller ClusterRole and binds it to this ServiceAccount.
   - node-controller
+  # Used by the route controller. The kube-apiserver bootstraps the
+  # system:controller:route-controller ClusterRole and binds it to this ServiceAccount.
+  - route-controller
   verbs:
   - create
 ---
