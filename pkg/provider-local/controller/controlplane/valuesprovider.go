@@ -6,6 +6,8 @@ package controlplane
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"time"
 
@@ -13,7 +15,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 
-	"github.com/cespare/xxhash/v2"
 	extensionscontroller "github.com/gardener/gardener/extensions/pkg/controller"
 	"github.com/gardener/gardener/extensions/pkg/controller/controlplane/genericactuator"
 	extensionssecretsmanager "github.com/gardener/gardener/extensions/pkg/util/secret/manager"
@@ -173,8 +174,9 @@ func (vp *valuesProvider) GetConfigChartValues(
 		}
 	}
 
-	hash64 := xxhash.Sum64([]byte(cluster.Shoot.UID))
-	hash32 := uint32(hash64 ^ (hash64 >> 32))
+	h := sha256.Sum256([]byte(cluster.Shoot.UID))
+	hash64 := binary.NativeEndian.Uint64(h[:])
+	hash20 := hash64 & 0xFFFFF
 
 	return map[string]any{
 		"runtimeCluster": runtimeCluster,
@@ -182,7 +184,7 @@ func (vp *valuesProvider) GetConfigChartValues(
 			"image": config.LoadBalancer.Image,
 		},
 		"routes": map[string]any{
-			"tableID": hash32,
+			"tableID": hash20,
 		},
 	}, nil
 }
