@@ -106,6 +106,7 @@ func New(cfg *cloudproviderv1alpha1.CloudProviderConfig) (cloudprovider.Interfac
 		cloudProvider.routes = &routes.Provider{
 			Config:        cfg,
 			RuntimeClient: runtimeClient,
+			DockerClient: dockerClient,
 			PodExecutor:   kubernetes.NewPodExecutor(config),
 		}
 	}

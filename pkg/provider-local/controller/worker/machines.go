@@ -116,6 +116,7 @@ func (w *workerDelegate) generateMachineConfig(ctx context.Context) error {
 			providerConfig := map[string]any{
 				"image":     image.Image,
 				"namespace": infrastructure.NamespaceName(w.cluster.Shoot.Status.TechnicalID),
+				"podCIDRs": w.cluster.Shoot.Status.Networking.Pods,
 			}
 
 			for _, ipFamily := range w.cluster.Shoot.Spec.Networking.IPFamilies {

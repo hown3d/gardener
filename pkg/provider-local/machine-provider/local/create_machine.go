@@ -131,7 +131,14 @@ func (d *localDriver) applyPod(
 	error,
 ) {
 	pod := podForMachine(req.Machine, req.MachineClass, providerSpec)
-	pod.Annotations = map[string]string{}
+	
+	podCIDRs, err := json.Marshal(providerSpec.PodCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling podCIDRs: %w", err)
+	}
+	pod.Annotations = map[string]string{
+		"cni.projectcalico.org/allowedSourcePrefixes": string(podCIDRs),
+	}
 
 	if providerSpec.IPPoolNameV4 != "" {
 		pod.Annotations["cni.projectcalico.org/ipv4pools"] = `["` + providerSpec.IPPoolNameV4 + `"]`

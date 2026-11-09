@@ -252,7 +252,7 @@ EOF
     max_retries=600
     for ((i = 0; i < max_retries; i++)); do
       if kubectl get felixconfiguration default > /dev/null 2>&1; then
-        if kubectl patch felixconfiguration default --type merge --patch '{"spec":{"allowIPIPPacketsFromWorkloads":true}}' > /dev/null 2>&1; then
+        if kubectl patch felixconfiguration default --type merge --patch '{"spec":{"allowIPIPPacketsFromWorkloads":true, "workloadSourceSpoofing":"Any"}}' > /dev/null 2>&1; then
           echo "FelixConfiguration 'default' successfully updated."
           felix_config_found=1
           break

@@ -4,3 +4,6 @@
 
 loadBalancer:
   image: image-repository:image-tag
+
+routes:
+  tableID: ""

@@ -13,3 +13,5 @@ data:
     {{- end }}
     loadBalancer:
       image: {{ .Values.loadBalancer.image }}
+    routes:
+      tableID: {{ .Values.routes.tableID }}
