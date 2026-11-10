@@ -14,3 +14,6 @@ spec:
         # Also see the comment for CALICO_IPV4POOL_CIDR in ../default-ipv4-pool/patch.yaml.
         - name: CALICO_IPV6POOL_CIDR
           value: "fd00:10:1::/56"
+        - name: IP6_AUTODETECTION_METHOD
+          value: "interface=eth.*"
+
