@@ -732,7 +732,12 @@ type ETCD struct {
 	Main *ETCDConfig `json:"main,omitempty" protobuf:"bytes,1,opt,name=main"`
 	// Events contains configuration for the events etcd.
 	// +optional
-	Events *ETCDConfig `json:"events,omitempty" protobuf:"bytes,2,opt,name=events"`
+	Events *ETCDEventsConfig `json:"events,omitempty" protobuf:"bytes,2,opt,name=events"`
+}
+
+type ETCDEventsConfig struct {
+	ETCDConfig `json:",inline" protobuf:"bytes,1,opt,name=etcdconfig"`
+	Disabled   *bool `json:"disabled,omitempty" protobuf:"varint,2,opt,name=disabled"`
 }
 
 // ETCDConfig contains etcd configuration.

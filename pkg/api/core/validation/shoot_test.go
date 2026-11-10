@@ -176,10 +176,12 @@ var _ = Describe("Shoot Validation Tests", func() {
 									},
 								},
 							},
-							Events: &core.ETCDConfig{
-								Autoscaling: &core.ControlPlaneAutoscaling{
-									MinAllowed: map[corev1.ResourceName]resource.Quantity{
-										"cpu": resource.MustParse("1"),
+							Events: &core.ETCDEventsConfig{
+								ETCDConfig: core.ETCDConfig{
+									Autoscaling: &core.ControlPlaneAutoscaling{
+										MinAllowed: map[corev1.ResourceName]resource.Quantity{
+											"cpu": resource.MustParse("1"),
+										},
 									},
 								},
 							},
@@ -2811,10 +2813,12 @@ var _ = Describe("Shoot Validation Tests", func() {
 								},
 							},
 						},
-						Events: &core.ETCDConfig{
-							Autoscaling: &core.ControlPlaneAutoscaling{
-								MinAllowed: corev1.ResourceList{
-									"memory": resource.MustParse("60M"),
+						Events: &core.ETCDEventsConfig{
+							ETCDConfig: core.ETCDConfig{
+								Autoscaling: &core.ControlPlaneAutoscaling{
+									MinAllowed: corev1.ResourceList{
+										"memory": resource.MustParse("60M"),
+									},
 								},
 							},
 						},
@@ -2832,10 +2836,12 @@ var _ = Describe("Shoot Validation Tests", func() {
 								},
 							},
 						},
-						Events: &core.ETCDConfig{
-							Autoscaling: &core.ControlPlaneAutoscaling{
-								MinAllowed: corev1.ResourceList{
-									"memory": resource.MustParse("59M"),
+						Events: &core.ETCDEventsConfig{
+							ETCDConfig: core.ETCDConfig{
+								Autoscaling: &core.ControlPlaneAutoscaling{
+									MinAllowed: corev1.ResourceList{
+										"memory": resource.MustParse("59M"),
+									},
 								},
 							},
 						},

@@ -167,9 +167,11 @@ var _ = Describe("Etcd", func() {
 							MinAllowed: minAllowedETCDMain,
 						},
 					},
-					Events: &gardencorev1beta1.ETCDConfig{
-						Autoscaling: &gardencorev1beta1.ControlPlaneAutoscaling{
-							MinAllowed: minAllowedETCDEvents,
+					Events: &gardencorev1beta1.ETCDEventsConfig{
+						ETCDConfig: gardencorev1beta1.ETCDConfig{
+							Autoscaling: &gardencorev1beta1.ControlPlaneAutoscaling{
+								MinAllowed: minAllowedETCDEvents,
+							},
 						},
 					},
 				}

@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
+	gardenletconfigv1alpha1helper "github.com/gardener/gardener/pkg/api/config/gardenlet/v1alpha1/helper"
 	gardenletconfigv1alpha1 "github.com/gardener/gardener/pkg/apis/config/gardenlet/v1alpha1"
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
@@ -202,6 +203,8 @@ func (r *Reconciler) runReconcileSeedFlow(
 	if err != nil {
 		return fmt.Errorf("failed to determine whether the seed is a self-hosted shoot with managed infrastructure: %w", err)
 	}
+
+	seedMonitoringEnabled := gardenletconfigv1alpha1helper.IsSeedMonitoringEnabled(&r.Config)
 
 	var (
 		g = flow.NewGraph("Seed reconciliation")
@@ -489,16 +492,6 @@ func (r *Reconciler) runReconcileSeedFlow(
 			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents, deployFluentOperator),
 			SkipIf:       seedIsGarden,
 		})
-		deployPlutono = g.Add(flow.Task{
-			Name:         "Deploying Plutono",
-			Fn:           c.plutono.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
-		})
-		waitUntilPlutonoReady = g.Add(flow.Task{
-			Name:         "Waiting until Plutono is ready",
-			Fn:           c.plutono.Wait,
-			Dependencies: flow.NewTaskIDs(deployPlutono),
-		})
 		_ = g.Add(flow.Task{
 			Name:         "Deploying VictoriaLogs",
 			Fn:           c.victoriaLogs.Deploy,
@@ -518,50 +511,25 @@ func (r *Reconciler) runReconcileSeedFlow(
 			SkipIf:       seedIsGarden,
 		})
 		_ = g.Add(flow.Task{
-			Name:         "Deploying cache Prometheus",
-			Fn:           c.cachePrometheus.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
-		})
-		_ = g.Add(flow.Task{
-			Name:         "Deploying seed Prometheus",
-			Fn:           c.seedPrometheus.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
-		})
-		deployAggregatePrometheus = g.Add(flow.Task{
-			Name:         "Deploying aggregate Prometheus",
-			Fn:           c.aggregatePrometheus.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
-		})
-		waitUntilAggregatePrometheusReady = g.Add(flow.Task{
-			Name:         "Waiting until aggregate Prometheus is ready",
-			Fn:           c.aggregatePrometheus.Wait,
-			Dependencies: flow.NewTaskIDs(deployAggregatePrometheus),
-		})
-		_ = g.Add(flow.Task{
-			Name:         "Deploying Alertmanager",
-			Fn:           c.alertManager.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
-		})
-		_ = g.Add(flow.Task{
 			Name:         "Deploying Perses Operator",
 			Fn:           c.persesOperator.Deploy,
 			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
 			SkipIf:       seedIsGarden,
 		})
-		deployPerses = g.Add(flow.Task{
-			Name:         "Deploying Perses",
-			Fn:           c.perses.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents),
-		})
-		waitUntilPersesReady = g.Add(flow.Task{
-			Name:         "Waiting until Perses is ready",
-			Fn:           c.perses.Wait,
-			Dependencies: flow.NewTaskIDs(deployPerses),
-		})
+		deploySeedMonitoring = g.AddGroup(
+			deploySeedMonitoringTaskGroup(c).
+				WithDependencies(syncPointReadyForSystemComponents).
+				SkipIf(!seedMonitoringEnabled),
+		)
+		destroySeedMonitoring = g.AddGroup(
+			destroySeedMonitoringTaskGroup(c).
+				WithDependencies(syncPointReadyForSystemComponents).
+				SkipIf(seedMonitoringEnabled),
+		)
 		_ = g.Add(flow.Task{
 			Name:         "Deploying istio-basic-auth-server",
 			Fn:           c.istioBasicAuthServer.Deploy,
-			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents, waitUntilAggregatePrometheusReady, waitUntilPlutonoReady, waitUntilPersesReady),
+			Dependencies: flow.NewTaskIDs(syncPointReadyForSystemComponents, deploySeedMonitoring, destroySeedMonitoring),
 		})
 		_ = g.Add(flow.Task{
 			Name:         "Deploying Victoria Operator",
@@ -595,6 +563,36 @@ func (r *Reconciler) runReconcileSeedFlow(
 	}
 
 	return secretsManager.Cleanup(ctx)
+}
+
+func deploySeedMonitoringTaskGroup(c components) flow.TaskGroup {
+	group := flow.NewTaskGroup("Deploying seed monitoring",
+		flow.Task{Name: "Deploying cache Prometheus", Fn: c.cachePrometheus.Deploy},
+		flow.Task{Name: "Deploying seed Prometheus", Fn: c.seedPrometheus.Deploy},
+		flow.Task{Name: "Deploying Alertmanager", Fn: c.alertManager.Deploy},
+	)
+
+	deployAggregatePrometheus := group.Add(flow.Task{Name: "Deploying aggregate Prometheus", Fn: c.aggregatePrometheus.Deploy})
+	group.Add(flow.Task{Name: "Waiting until aggregate Prometheus is ready", Fn: c.aggregatePrometheus.Wait, Dependencies: flow.NewTaskIDs(deployAggregatePrometheus)})
+
+	deployPlutono := group.Add(flow.Task{Name: "Deploying Plutono", Fn: c.plutono.Deploy})
+	group.Add(flow.Task{Name: "Waiting until Plutono is ready", Fn: c.plutono.Wait, Dependencies: flow.NewTaskIDs(deployPlutono)})
+
+	deployPerses := group.Add(flow.Task{Name: "Deploying Perses", Fn: c.perses.Deploy})
+	group.Add(flow.Task{Name: "Waiting until Perses is ready", Fn: c.perses.Wait, Dependencies: flow.NewTaskIDs(deployPerses)})
+
+	return group
+}
+
+func destroySeedMonitoringTaskGroup(c components) flow.TaskGroup {
+	return flow.NewTaskGroup("Destroying seed monitoring",
+		flow.Task{Name: "Destroying cache Prometheus", Fn: c.cachePrometheus.Destroy},
+		flow.Task{Name: "Destroying seed Prometheus", Fn: c.seedPrometheus.Destroy},
+		flow.Task{Name: "Destroying aggregate Prometheus", Fn: c.aggregatePrometheus.Destroy},
+		flow.Task{Name: "Destroying Alertmanager", Fn: c.alertManager.Destroy},
+		flow.Task{Name: "Destroying Plutono", Fn: component.OpDestroyAndWait(c.plutono).Destroy},
+		flow.Task{Name: "Destroying Perses", Fn: component.OpDestroyAndWait(c.perses).Destroy},
+	)
 }
 
 func cleanupOrphanExposureClassHandlerResources(

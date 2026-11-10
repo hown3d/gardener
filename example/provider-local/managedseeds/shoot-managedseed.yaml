@@ -33,6 +33,9 @@ spec:
       maxSurge: 1
       maxUnavailable: 0
   kubernetes:
+    etcd:
+      events:
+        disabled: true
     kubelet:
       serializeImagePulls: false
       registryPullQPS: 10

@@ -566,13 +566,18 @@ type ETCD struct {
 	// Main contains configuration for the main etcd.
 	Main *ETCDConfig
 	// Events contains configuration for the events etcd.
-	Events *ETCDConfig
+	Events *ETCDEventsConfig
 }
 
 // ETCDConfig contains etcd configuration.
 type ETCDConfig struct {
 	// Autoscaling contains auto-scaling configuration options for etcd.
 	Autoscaling *ControlPlaneAutoscaling
+}
+
+type ETCDEventsConfig struct {
+	ETCDConfig
+	Disabled *bool
 }
 
 // ClusterAutoscaler contains the configuration flags for the Kubernetes cluster autoscaler.
