@@ -48,7 +48,8 @@ func networkPolicies(namespace string, cluster *extensionscontroller.Cluster) []
 		Ingress: []networkingv1.NetworkPolicyIngressRule{
 			allowFromLoadBalancers(), // incoming LB traffic to node-ports + health check endpoint
 			allowFromBastionToSSH(),
-			{From: machinePodPeers()}, // allow intra-machine communication
+			{From: machinePodPeers()},      // allow intra-machine communication
+			{From: shootPodPeers(cluster)}, // allow cross-node pod-to-pod communication in native routing
 		},
 		Egress: []networkingv1.NetworkPolicyEgressRule{
 			allowToIstioGateways(),  // kube-proxy might short-circuit traffic to the istio-ingressgateway pods
@@ -56,7 +57,8 @@ func networkPolicies(namespace string, cluster *extensionscontroller.Cluster) []
 			allowToPublicNetworks(), // In case we need to pull manifests from public registries, or a workload wants to reach the public internet
 			allowToLoadBalancers(),
 			{To: machinePodPeers()},
-			{To: kindPeers()}, // required to reach registry (mirrors)
+			{To: kindPeers()},            // required to reach registry (mirrors)
+			{To: shootPodPeers(cluster)}, // allow cross-node pod-to-pod communication in native routing
 		},
 		PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeIngress, networkingv1.PolicyTypeEgress},
 	}
@@ -78,6 +80,12 @@ func kindPeers() []networkingv1.NetworkPolicyPeer {
 	return []networkingv1.NetworkPolicyPeer{
 		{IPBlock: &networkingv1.IPBlock{CIDR: "172.18.0.0/24"}},
 		{IPBlock: &networkingv1.IPBlock{CIDR: "fd00:10::/64"}},
+	}
+}
+
+func shootPodPeers(cluster *extensionscontroller.Cluster) []networkingv1.NetworkPolicyPeer {
+	return []networkingv1.NetworkPolicyPeer{
+		{IPBlock: &networkingv1.IPBlock{CIDR: *cluster.Shoot.Spec.Networking.Pods}},
 	}
 }
 
