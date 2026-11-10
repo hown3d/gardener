@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -49,19 +51,11 @@ type Provider struct {
 // CreateRoute implements [cloudprovider.Routes].
 func (p *Provider) CreateRoute(ctx context.Context, clusterName string, nameHint string, route *cloudprovider.Route) error {
 	if err := p.modifyRoute(ctx, opCreate, route); err != nil {
-		processErr, ok := errors.AsType[processError](err)
-		if !ok {
-			return err
-		}
-
-		stdout, err := io.ReadAll(processErr.stderr)
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(string(stdout)) == "RTNETLINK answers: File exists" {
+		if isFileAlreadyExists(err) {
 			klog.Info("route already exists")
 			return nil
 		}
+		return err
 	}
 	return nil
 }
@@ -110,49 +104,142 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 		return err
 	}
 
+	nodeList := &corev1.NodeList{}
+	if err := p.RuntimeClient.List(ctx, nodeList); err != nil {
+		return err
+	}
+	type tunnelInfo struct {
+		nodeIP   netip.Addr
+		tunnelIP netip.Addr
+		mac      net.HardwareAddr
+	}
+	nodeTunnelMap := map[string]tunnelInfo{}
+
+	vxlanDeviceName := fmt.Sprintf("vxlan%d", p.Config.Routes.TableID)
+	slices.SortFunc(nodeList.Items, func(a, b corev1.Node) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	for i, node := range nodeList.Items {
+		containerID, err := p.containerIDByName(ctx, node.Name)
+		if err != nil {
+			return err
+		}
+		vxlanTunnelIP, vxlanMAC, err := p.ensureVXLANDevice(ctx, containerID, vxlanDeviceName, p.Config.Routes.TableID, i+1)
+		if err != nil {
+			return fmt.Errorf("ensuring vxlan device: %w", err)
+		}
+		nodeIP, err := getNodeInternalIP(&node)
+		if err != nil {
+			return err
+		}
+		nodeTunnelMap[node.Name] = tunnelInfo{
+			tunnelIP: vxlanTunnelIP,
+			mac:      vxlanMAC,
+			nodeIP:   nodeIP,
+		}
+	}
+
+	// setup vxlan endpoints on every node
+	for _, node := range nodeList.Items {
+		containerID, err := p.containerIDByName(ctx, node.Name)
+		if err != nil {
+			return err
+		}
+		for otherNode, info := range nodeTunnelMap {
+			if otherNode == node.Name {
+				continue
+			}
+			_, _, err = p.executeCommandInContainer(ctx, containerID, []string{
+				"bridge", "fdb", "append", info.mac.String(), "dev", vxlanDeviceName, "dst", info.nodeIP.String(),
+			})
+			if err != nil {
+				return fmt.Errorf("appending to bridge: %w", err)
+			}
+
+			_, _, err = p.executeCommandInContainer(ctx, containerID, []string{
+				"ip", "neigh", "add", info.tunnelIP.String(), "lladdr", info.mac.String(), "dev", vxlanDeviceName, "nud", "permanent",
+			})
+			if err != nil {
+				if !isFileAlreadyExists(err) {
+				return fmt.Errorf("setting neighbor for tunnel ip: %w", err)
+				}
+			}
+
+		}
+	}
+
+	type podInfo struct {
+		NodeName string
+		Name     string
+	}
+
+	// key = podIP
+	podIPToInfo := map[string]podInfo{}
+
 	var routeErr error
 	for _, pod := range machinePodList.Items {
-		log := klog.FromContext(ctx).WithValues("targetNode", route.TargetNode, "operation", op, "pod", pod.Name)
+		podIPToInfo[pod.Status.PodIP] = podInfo{
+			NodeName: pod.Spec.NodeName,
+			Name:     pod.Name,
+		}
+	}
+	for podIP, info := range podIPToInfo {
+		log := klog.FromContext(ctx).WithValues("targetNode", route.TargetNode, "operation", op)
 
-		podIP, err := netip.ParseAddr(pod.Status.PodIP)
+		podName := info.Name
+		nodeName := info.NodeName
+		podIP, err := netip.ParseAddr(podIP)
 		if err != nil {
 			return err
 		}
 
 		// skip route if target node is the pod itself
-		if podIP.Compare(nodeInternalIP) == 0 {
-			log.Info("pod is targetNode, skipping route")
-			continue
-		}
+		if podIP.Compare(nodeInternalIP) != 0 {
 		cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", nodeInternalIP.String(), "dev", "eth0", "onlink"}
 		log.Info("modifyRoute", "cmd", strings.Join(cmd, " "))
-		_, _, err = p.executeCommandInPod(ctx, pod.Name, cmd)
+		_, _, err = p.executeCommandInPod(ctx, podName, cmd)
 		if err != nil {
-			routeErr = errors.Join(routeErr, fmt.Errorf("adding route in pod %s: %w", pod.Name, err))
+			if !isFileAlreadyExists(err) {
+			routeErr = errors.Join(routeErr, fmt.Errorf("adding route in pod %s: %w", podName, err))
+			}
+		}
 		}
 
-		nodeName := pod.Spec.NodeName
+		destinationInfo := podIPToInfo[nodeInternalIP.String()]
 		containerID, err := p.containerIDByName(ctx, nodeName)
 		if err != nil {
 			return err
 		}
+		if destinationInfo.NodeName == nodeName {
+			log.Info("same node")
 
-		podLinkIndex, err := p.machinePodLinkIndex(ctx, pod.Name)
-		if err != nil {
-			return fmt.Errorf("getting machine pod link index: %w", err)
-		}
+			podLinkIndex, err := p.machinePodLinkIndex(ctx, podName)
+			if err != nil {
+				return fmt.Errorf("getting machine pod link index: %w", err)
+			}
 
-		machinePodifName, err := p.machinePodLinkName(ctx, containerID, podLinkIndex)
-		if err != nil {
-			return fmt.Errorf("getting machine pod link name: %w", err)
-		}
+			machinePodifName, err := p.machinePodLinkName(ctx, containerID, podLinkIndex)
+			if err != nil {
+				return fmt.Errorf("getting machine pod link name: %w", err)
+			}
 
-		if err := p.ensureIPRule(ctx, containerID, machinePodifName); err != nil {
-			return fmt.Errorf("ensuring ip rule on kind node %s: %w", nodeName, err)
-		}
+			if err := p.ensureIPRule(ctx, containerID, machinePodifName); err != nil {
+				return fmt.Errorf("ensuring ip rule on kind node %s: %w", nodeName, err)
+			}
 
-		if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, nodeInternalIP); err != nil {
-			return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
+			if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, nodeInternalIP, "", false); err != nil {
+				return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
+			}
+		} else {
+			tunnelInfo := nodeTunnelMap[destinationInfo.NodeName]
+			log.Info("other node")
+			if err := p.ensureIPRule(ctx, containerID, vxlanDeviceName); err != nil {
+				return fmt.Errorf("ensuring vxlan ip rule on kind node %s: %w", nodeName, err)
+			}
+			if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, tunnelInfo.tunnelIP, vxlanDeviceName, true); err != nil {
+				return fmt.Errorf("ensuring vxlan ip route on kind node %s: %w", nodeName, err)
+			}
+
 		}
 
 	}
@@ -299,8 +386,8 @@ func (p *Provider) machinePodLinkName(ctx context.Context, nodeContainerID strin
 }
 
 // ensureIPRoute ensures an ip rule in the outer node's container for each machine pod to lookup the correct routing table
-func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, machinePodIfName string) error {
-	stdout, _, err := p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "--json", "rule", "show", "iif", machinePodIfName, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
+func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, ifname string) error {
+	stdout, _, err := p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "--json", "rule", "show", "iif", ifname, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
 	if err != nil {
 		return err
 	}
@@ -314,7 +401,7 @@ func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, machinePod
 	if len(rules) != 0 {
 		return nil
 	}
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "rule", "add", "iif", machinePodIfName, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "rule", "add", "iif", ifname, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
 	if err != nil {
 		return err
 	}
@@ -323,13 +410,59 @@ func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, machinePod
 }
 
 // ensureIPRoute ensures an ip route in the outer node's container for each machine pod
-func (p *Provider) ensureIPRoute(ctx context.Context, op op, nodeContainerID, destinationCIDR string, nodeIP netip.Addr) error {
+func (p *Provider) ensureIPRoute(ctx context.Context, op op, nodeContainerID, destinationCIDR string, nodeIP netip.Addr, dev string, onlink bool) error {
 	cmd := []string{"ip", "route", string(op), destinationCIDR, "via", nodeIP.String(), "table", strconv.Itoa(p.Config.Routes.TableID)}
+	if dev != "" {
+		cmd = append(cmd, "dev", dev)
+	}
+	if onlink {
+		cmd = append(cmd, "onlink")
+	}
 	_, _, err := p.executeCommandInContainer(ctx, nodeContainerID, cmd)
 	if err != nil {
-		return err
+		if !isFileAlreadyExists(err) {
+			return err
+		}
 	}
 	return nil
+}
+
+func (p *Provider) ensureVXLANDevice(ctx context.Context, nodeContainerID, deviceName string, vni int, index int) (netip.Addr, net.HardwareAddr, error) {
+	cmd := []string{"ip", "link", "add", deviceName, "type", "vxlan", "id", strconv.Itoa(vni), "dev", "eth0", "dstport", "4789", "nolearning"}
+	_, _, err := p.executeCommandInContainer(ctx, nodeContainerID, cmd)
+	if err != nil {
+		if !isFileAlreadyExists(err) {
+			return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("creating vxlan device: %w", err)
+		}
+	}
+
+	vxlanMac, _ := net.ParseMAC(fmt.Sprintf("02:42:0a:fe:64:0%d", index))
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "address", vxlanMac.String()})
+	if err != nil {
+		if !isFileAlreadyExists(err) {
+			return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("set mac address for vxlan device: %w", err)
+		}
+	}
+
+	vxlanTunnelIP := netip.MustParseAddr(fmt.Sprintf("10.254.100.%d", index))
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "addr", "add", vxlanTunnelIP.String() + "/24", "dev", deviceName})
+	if err != nil {
+		if !isAddressAlreadyAssigned(err) {
+			return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("setting ip %s on vxlan device %s: %w", vxlanTunnelIP, deviceName, err)
+		}
+	}
+
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "up"})
+	if err != nil {
+		return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("setting vxlan device up: %w", err)
+	}
+
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", deviceName)})
+	if err != nil {
+		return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("disable rpfilter on vxlan device: %w", err)
+	}
+
+	return vxlanTunnelIP, vxlanMac, nil
 }
 
 func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
@@ -349,10 +482,12 @@ func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
 	return m, nil
 }
 
+
 type ipLink struct {
 	IfIndex   int    `json:"ifindex"`
 	LinkIndex int    `json:"link_index"`
 	IfName    string `json:"ifname"`
+	Address   string `json:"address"`
 }
 
 type ipRule struct {
@@ -451,21 +586,12 @@ func (p *Provider) containerIDByName(ctx context.Context, name string) (string, 
 	return "", fmt.Errorf("container with name %s not found", name)
 }
 
-type processError struct {
-	code   int
-	stderr io.Reader
-	stdout io.Reader
-}
-
-func (e processError) Error() string {
-	stdout, err := io.ReadAll(e.stdout)
-	if err != nil {
-		return err.Error()
+func getNodeInternalIP(node *corev1.Node) (netip.Addr, error) {
+	for _, address := range node.Status.Addresses {
+		if address.Type != corev1.NodeInternalIP {
+			continue
+		}
+		return netip.ParseAddr(address.Address)
 	}
-
-	stderr, err := io.ReadAll(e.stderr)
-	if err != nil {
-		return err.Error()
-	}
-	return fmt.Sprintf("process exit with code %d\nstderr:\n%s\nstdout:\n%s\n", e.code, stderr, stdout)
+	return netip.Addr{}, fmt.Errorf("no internal address found")
 }
