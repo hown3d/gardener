@@ -110,6 +110,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		v1beta1.ETCD{}.OpenAPIModelName():                                         schema_pkg_apis_core_v1beta1_ETCD(ref),
 		v1beta1.ETCDConfig{}.OpenAPIModelName():                                   schema_pkg_apis_core_v1beta1_ETCDConfig(ref),
 		v1beta1.ETCDEncryptionKeyRotation{}.OpenAPIModelName():                    schema_pkg_apis_core_v1beta1_ETCDEncryptionKeyRotation(ref),
+		v1beta1.ETCDEventsConfig{}.OpenAPIModelName():                             schema_pkg_apis_core_v1beta1_ETCDEventsConfig(ref),
 		v1beta1.EncryptionAtRest{}.OpenAPIModelName():                             schema_pkg_apis_core_v1beta1_EncryptionAtRest(ref),
 		v1beta1.EncryptionConfig{}.OpenAPIModelName():                             schema_pkg_apis_core_v1beta1_EncryptionConfig(ref),
 		v1beta1.EncryptionProvider{}.OpenAPIModelName():                           schema_pkg_apis_core_v1beta1_EncryptionProvider(ref),
@@ -3922,14 +3923,14 @@ func schema_pkg_apis_core_v1beta1_ETCD(ref common.ReferenceCallback) common.Open
 					"events": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Events contains configuration for the events etcd.",
-							Ref:         ref(v1beta1.ETCDConfig{}.OpenAPIModelName()),
+							Ref:         ref(v1beta1.ETCDEventsConfig{}.OpenAPIModelName()),
 						},
 					},
 				},
 			},
 		},
 		Dependencies: []string{
-			v1beta1.ETCDConfig{}.OpenAPIModelName()},
+			v1beta1.ETCDConfig{}.OpenAPIModelName(), v1beta1.ETCDEventsConfig{}.OpenAPIModelName()},
 	}
 }
 
@@ -4006,6 +4007,32 @@ func schema_pkg_apis_core_v1beta1_ETCDEncryptionKeyRotation(ref common.Reference
 		},
 		Dependencies: []string{
 			metav1.Time{}.OpenAPIModelName()},
+	}
+}
+
+func schema_pkg_apis_core_v1beta1_ETCDEventsConfig(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type: []string{"object"},
+				Properties: map[string]spec.Schema{
+					"autoscaling": {
+						SchemaProps: spec.SchemaProps{
+							Description: "Autoscaling contains auto-scaling configuration options for etcd.",
+							Ref:         ref(v1beta1.ControlPlaneAutoscaling{}.OpenAPIModelName()),
+						},
+					},
+					"disabled": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"boolean"},
+							Format: "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{
+			v1beta1.ControlPlaneAutoscaling{}.OpenAPIModelName()},
 	}
 }
 

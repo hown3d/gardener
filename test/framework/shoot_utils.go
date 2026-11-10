@@ -447,7 +447,7 @@ func setShootControlPlaneAutoscaling(shoot *gardencorev1beta1.Shoot, cfg *ShootC
 			shoot.Spec.Kubernetes.ETCD = &gardencorev1beta1.ETCD{}
 		}
 		if shoot.Spec.Kubernetes.ETCD.Events == nil {
-			shoot.Spec.Kubernetes.ETCD.Events = &gardencorev1beta1.ETCDConfig{}
+			shoot.Spec.Kubernetes.ETCD.Events = &gardencorev1beta1.ETCDEventsConfig{}
 		}
 		if shoot.Spec.Kubernetes.ETCD.Main == nil {
 			shoot.Spec.Kubernetes.ETCD.Main = &gardencorev1beta1.ETCDConfig{}

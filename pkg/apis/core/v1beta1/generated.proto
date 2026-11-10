@@ -1137,7 +1137,7 @@ message ETCD {
 
   // Events contains configuration for the events etcd.
   // +optional
-  optional ETCDConfig events = 2;
+  optional ETCDEventsConfig events = 2;
 }
 
 // ETCDConfig contains etcd configuration.
@@ -1181,6 +1181,12 @@ message ETCDEncryptionKeyRotation {
   // TODO(AleksandarSavchev): Remove this after support for Kubernetes v1.33 is dropped.
   // +optional
   optional bool autoCompleteAfterPrepared = 6;
+}
+
+message ETCDEventsConfig {
+  optional ETCDConfig etcdconfig = 1;
+
+  optional bool disabled = 2;
 }
 
 // EncryptionAtRest contains information about Shoot data encryption at rest.

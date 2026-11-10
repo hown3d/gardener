@@ -35,6 +35,14 @@ spec:
         enabled: false
       persistentVolumeClaimAutoscaler:
         enabled: true
+      monitoring:
+        enabled: false
+      logging:
+        enabled: false
+        victoriaLogs:
+          enabled: false
+        vali:
+          enabled: false
   virtualCluster:
     dns:
       domains:
@@ -49,8 +57,7 @@ spec:
         storage:
           capacity: 25Gi
       events:
-        storage:
-          capacity: 10Gi
+        disabled: true
     kubernetes:
       version: 1.36.2
     gardener:

@@ -10,6 +10,17 @@ spec:
     config:
       apiVersion: gardenlet.config.gardener.cloud/v1alpha1
       kind: GardenletConfiguration
+      monitoring:
+        seed:
+          enabled: false
+        shoot:
+          enabled: false
+      logging:
+        enabled: true
+        vali:
+          enabled: false
+        victoriaLogs:
+          enabled: false
       seedConfig:
         spec:
           dns:

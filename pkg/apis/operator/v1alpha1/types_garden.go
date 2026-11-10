@@ -194,6 +194,48 @@ type Settings struct {
 	// components deployed in the garden cluster.
 	// +optional
 	PersistentVolumeClaimAutoscaler *SettingPersistentVolumeClaimAutoscaler `json:"persistentVolumeClaimAutoscaler,omitempty"`
+
+	Logging *Logging `json:"logging,omitempty"`
+
+	Monitoring *Monitoring `json:"monitoring,omitempty"`
+}
+
+type Monitoring struct {
+	// Enabled is used to enable or disable the seed monitoring stack.
+	// Defaults to true.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// Logging contains configuration for the logging stack.
+type Logging struct {
+	// Enabled is used to enable or disable logging stack for clusters.
+	// Defaults to true.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	// Vali contains configuration for the Vali
+	// +optional
+	Vali *Vali `json:"vali,omitempty" yaml:"vali,omitempty"`
+	// VictoriaLogs contains configuration for VictoriaLogs
+	// +optional
+	VictoriaLogs *VictoriaLogs `json:"victoriaLogs,omitempty" yaml:"victoriaLogs,omitempty"`
+}
+
+// Vali contains configuration for the Vali.
+type Vali struct {
+	// Enabled is used to enable or disable the shoot and seed Vali.
+	// If FluentBit is used with a custom output the Vali can, Vali is maybe unused and can be disabled.
+	// If not set, by default Vali is enabled
+	// +optional
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+}
+
+// VictoriaLogs contains configuration for the VictoriaLogs.
+type VictoriaLogs struct {
+	// Enabled is used to enable or disable VictoriaLogs.
+	// If not set, by default VictoriaLogs is enabled when the VictoriaLogsBackend feature gate is enabled.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 }
 
 // SettingLoadBalancerServices controls certain settings for services of type load balancer that are created in the
@@ -332,6 +374,9 @@ type ETCDMain struct {
 
 // ETCDEvents contains configuration for the events etcd.
 type ETCDEvents struct {
+	// Disabled indicates whether the events etcd is disabled.
+	// +optional
+	Disabled *bool `json:"disabled,omitempty"`
 	// Autoscaling contains auto-scaling configuration options for etcd.
 	// +optional
 	Autoscaling *gardencorev1beta1.ControlPlaneAutoscaling `json:"autoscaling,omitempty"`

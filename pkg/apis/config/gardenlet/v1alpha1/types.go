@@ -755,6 +755,9 @@ type MonitoringConfig struct {
 	// Shoot is optional and contains settings for the shoot monitoring stack.
 	// +optional
 	Shoot *ShootMonitoringConfig `json:"shoot,omitempty"`
+	// Seed is optional and contains settings for the seed monitoring stack.
+	// +optional
+	Seed *SeedMonitoringConfig `json:"seed,omitempty"`
 }
 
 // ShootMonitoringConfig contains settings for the shoot monitoring stack.
@@ -769,6 +772,13 @@ type ShootMonitoringConfig struct {
 	// ExternalLabels is optional and sets additional external labels for the monitoring stack.
 	// +optional
 	ExternalLabels map[string]string `json:"externalLabels,omitempty"`
+}
+
+type SeedMonitoringConfig struct {
+	// Enabled is used to enable or disable the shoot monitoring stack.
+	// Defaults to true.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
 }
 
 // RemoteWriteMonitoringConfig contains settings for the remote write setting for monitoring stack.

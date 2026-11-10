@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 
+	v1beta1helper "github.com/gardener/gardener/pkg/api/core/v1beta1/helper"
 	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
 	"github.com/gardener/gardener/pkg/component/etcd/etcd"
 )
@@ -75,9 +76,13 @@ func (b *Botanist) instantiateComponentsControlPlane(ctx context.Context) (err e
 	if err != nil {
 		return err
 	}
-	b.Shoot.Components.ControlPlane.EtcdEvents, err = b.DefaultEtcd(ctx, v1beta1constants.ETCDRoleEvents, etcd.ClassNormal)
-	if err != nil {
-		return err
+	if v1beta1helper.IsETCDEventsEnabled(b.Shoot.GetInfo().Spec.Kubernetes.ETCD) {
+		b.Shoot.Components.ControlPlane.EtcdEvents, err = b.DefaultEtcd(ctx, v1beta1constants.ETCDRoleEvents, etcd.ClassNormal)
+		if err != nil {
+			return err
+		}
+	} else {
+		b.Shoot.Components.ControlPlane.EtcdEvents = etcd.NewNoOp()
 	}
 	if !b.Shoot.IsSelfHosted() {
 		b.Shoot.Components.ControlPlane.EtcdMemberExposure = b.DefaultEtcdMemberExposure()

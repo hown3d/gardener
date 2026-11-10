@@ -178,6 +178,10 @@ func (r *Reconciler) reconcile(
 
 	var (
 		backupConfigured        = helper.GetETCDMainBackup(garden) != nil
+		monitoringEnabled       = isSeedMonitoringEnabled(garden.Spec.RuntimeCluster.Settings)
+		loggingEnabled          = isLoggingEnabled(garden.Spec.RuntimeCluster.Settings)
+		valiLoggingEnabled      = isValiEnabled(garden.Spec.RuntimeCluster.Settings)
+		victoriaLogsEnabled     = isVictoriaLogsEnabled(garden.Spec.RuntimeCluster.Settings)
 		virtualClusterClientSet kubernetes.Interface
 		virtualClusterClient    client.Client
 		defaultEncryptedGVKs    = append(gardenerutils.DefaultGardenerGVKsForEncryption(), gardenerutils.DefaultGVKsForEncryption()...)
@@ -711,21 +715,51 @@ func (r *Reconciler) reconcile(
 			Dependencies: flow.NewTaskIDs(initializeVirtualClusterClient, waitUntilGardenerAPIServerReady, snapshotETCD),
 		})
 
-		_ = g.Add(flow.Task{
-			Name: "Deploying fluent-operator",
-			Fn:   c.fluentOperator.Deploy,
-		})
-		_ = g.Add(flow.Task{
-			Name: "Deploying fluent-operator CustomResources",
-			Fn:   c.fluentOperatorCustomResources.Deploy,
-		})
-		_ = g.Add(flow.Task{
-			Name: "Deploying fluent-bit",
-			Fn:   c.fluentBit.Deploy,
-		})
+		_ = g.AddGroup(func() flow.TaskGroup {
+			group := flow.NewTaskGroup("Deploying logging",
+				flow.Task{Name: "Deploying fluent-operator", Fn: c.fluentOperator.Deploy},
+				flow.Task{Name: "Deploying fluent-operator CustomResources", Fn: c.fluentOperatorCustomResources.Deploy},
+				flow.Task{Name: "Deploying fluent-bit", Fn: c.fluentBit.Deploy},
+			)
+
+			deployOpenTelemetryOperator := group.Add(flow.Task{Name: "Deploying OpenTelemetry Operator", Fn: c.openTelemetryOperator.Deploy})
+			group.Add(flow.Task{
+				Name:         "Deploying OpenTelemetry Collector",
+				Fn:           c.openTelemetryCollector.Deploy,
+				Dependencies: flow.NewTaskIDs(deployOpenTelemetryOperator),
+			})
+
+			return group.SkipIf(!loggingEnabled)
+		}())
+		_ = g.AddGroup(func() flow.TaskGroup {
+			// The custom resources must be destroyed before their operators are removed.
+			group := flow.NewTaskGroup("Destroying logging")
+
+			destroyFluentOperatorCustomResources := group.Add(flow.Task{Name: "Destroying fluent-operator CustomResources", Fn: component.OpDestroyAndWait(c.fluentOperatorCustomResources).Destroy})
+			destroyFluentBit := group.Add(flow.Task{Name: "Destroying fluent-bit", Fn: component.OpDestroyAndWait(c.fluentBit).Destroy})
+			group.Add(flow.Task{
+				Name:         "Destroying fluent-operator",
+				Fn:           component.OpDestroyAndWait(c.fluentOperator).Destroy,
+				Dependencies: flow.NewTaskIDs(destroyFluentOperatorCustomResources, destroyFluentBit),
+			})
+
+			destroyOpenTelemetryCollector := group.Add(flow.Task{Name: "Destroying OpenTelemetry Collector", Fn: component.OpDestroyAndWait(c.openTelemetryCollector).Destroy})
+			group.Add(flow.Task{
+				Name:         "Destroying OpenTelemetry Operator",
+				Fn:           component.OpDestroyAndWait(c.openTelemetryOperator).Destroy,
+				Dependencies: flow.NewTaskIDs(destroyOpenTelemetryCollector),
+			})
+
+			return group.SkipIf(loggingEnabled)
+		}())
 		_ = g.Add(flow.Task{
 			Name: "Deploying VictoriaLogs",
-			Fn:   c.victoriaLogs.Deploy,
+			Fn: func(ctx context.Context) error {
+				if !victoriaLogsEnabled {
+					return c.victoriaLogs.Destroy(ctx)
+				}
+				return c.victoriaLogs.Deploy(ctx)
+			},
 			// TODO(rrhubenov): the `enableVali` flag is false only if the runtime cluster is running in an IPv6 environment.
 			// When we completely remove `Vali`, this needs to be reviewed and VictoriaLogs introduced to IPv6 environments as well.
 			// For now, IPv6 clusters remain without a logging backend.
@@ -733,7 +767,12 @@ func (r *Reconciler) reconcile(
 		})
 		_ = g.Add(flow.Task{
 			Name: "Deploying Vali",
-			Fn:   c.vali.Deploy,
+			Fn: func(ctx context.Context) error {
+				if !valiLoggingEnabled {
+					return c.vali.Destroy(ctx)
+				}
+				return c.vali.Deploy(ctx)
+			},
 			// TODO(rrhubenov): the `enableVali` flag is false only if the runtime cluster is running in an IPv6 environment.
 			// When we completely remove `Vali`, this needs to be reviewed and VictoriaLogs introduced to IPv6 environments as well.
 			// For now, IPv6 clusters remain without a logging backend.
@@ -743,64 +782,95 @@ func (r *Reconciler) reconcile(
 			Name: "Deploying prometheus-operator",
 			Fn:   c.prometheusOperator.Deploy,
 		})
-		deployOpenTelemetryOperator = g.Add(flow.Task{
-			Name: "Deploying OpenTelemetry Operator",
-			Fn:   c.openTelemetryOperator.Deploy,
-		})
-		deployAlertmanager = g.Add(flow.Task{
-			Name: "Deploying Alertmanager",
-			Fn: func(ctx context.Context) error {
-				c.alertManager.SetIngressAuthSecret(v1beta1constants.SecretNameObservabilityIngress, true)
-				return c.alertManager.Deploy(ctx)
-			},
-			Dependencies: flow.NewTaskIDs(generateObservabilityIngressPassword),
-		})
-		waitUntilAlertmanagerReady = g.Add(flow.Task{
-			Name:         "Waiting until Alertmanager is ready",
-			Fn:           c.alertManager.Wait,
-			Dependencies: flow.NewTaskIDs(deployAlertmanager),
-		})
-		deployPrometheusGarden = g.Add(flow.Task{
-			Name: "Deploying Garden Prometheus",
-			Fn: func(ctx context.Context) error {
-				aggregatePrometheusHost, err := r.getAggregatePrometheusHost(ctx)
-				if err != nil {
-					return err
-				}
-				discoveryServerEnabled := garden.Spec.VirtualCluster.Gardener.DiscoveryServer != nil
-				dashboardDomain := helper.PrimaryDashboardDomain(garden)
-				return r.deployGardenPrometheus(ctx, c.prometheusGarden, virtualClusterClient, aggregatePrometheusHost, dashboardDomain, discoveryServerEnabled)
-			},
-			Dependencies: flow.NewTaskIDs(waitUntilGardenerAPIServerReady, initializeVirtualClusterClient, generateAndReplicateGlobalObservabilityIngressPassword),
-		})
-		waitUntilPrometheusGardenReady = g.Add(flow.Task{
-			Name:         "Waiting until Garden Prometheus is ready",
-			Fn:           c.prometheusGarden.Wait,
-			Dependencies: flow.NewTaskIDs(deployPrometheusGarden),
-		})
-		deployPrometheusLongTerm = g.Add(flow.Task{
-			Name: "Deploying long-term Prometheus",
-			Fn: func(ctx context.Context) error {
-				return r.deployLongTermPrometheus(ctx, c.prometheusLongTerm)
-			},
-			Dependencies: flow.NewTaskIDs(deployPrometheusGarden),
-		})
-		waitUntilPrometheusLongTermReady = g.Add(flow.Task{
-			Name:         "Waiting until long-term Prometheus is ready",
-			Fn:           c.prometheusLongTerm.Wait,
-			Dependencies: flow.NewTaskIDs(deployPrometheusLongTerm),
-		})
-		_ = g.Add(flow.Task{
-			Name:         "Deploying OpenTelemetry Collector",
-			Fn:           c.openTelemetryCollector.Deploy,
-			Dependencies: flow.NewTaskIDs(deployOpenTelemetryOperator),
-		})
-		_ = g.Add(flow.Task{
-			Name:         "Deploying blackbox-exporter",
-			Fn:           c.blackboxExporter.Deploy,
-			Dependencies: flow.NewTaskIDs(waitUntilKubeAPIServerIsReady, deployPrometheusGarden),
-		})
+		deploySeedMonitoring = g.AddGroup(func() flow.TaskGroup {
+			group := flow.NewTaskGroup("Deploying monitoring")
 
+			deployAlertmanager := group.Add(flow.Task{
+				Name: "Deploying Alertmanager",
+				Fn: func(ctx context.Context) error {
+					c.alertManager.SetIngressAuthSecret(v1beta1constants.SecretNameObservabilityIngress, true)
+					return c.alertManager.Deploy(ctx)
+				},
+				Dependencies: flow.NewTaskIDs(generateObservabilityIngressPassword),
+			})
+			group.Add(flow.Task{
+				Name:         "Waiting until Alertmanager is ready",
+				Fn:           c.alertManager.Wait,
+				Dependencies: flow.NewTaskIDs(deployAlertmanager),
+			})
+
+			deployPrometheusGarden := group.Add(flow.Task{
+				Name: "Deploying Garden Prometheus",
+				Fn: func(ctx context.Context) error {
+					aggregatePrometheusHost, err := r.getAggregatePrometheusHost(ctx)
+					if err != nil {
+						return err
+					}
+					discoveryServerEnabled := garden.Spec.VirtualCluster.Gardener.DiscoveryServer != nil
+					dashboardDomain := helper.PrimaryDashboardDomain(garden)
+					return r.deployGardenPrometheus(ctx, c.prometheusGarden, virtualClusterClient, aggregatePrometheusHost, dashboardDomain, discoveryServerEnabled)
+				},
+				Dependencies: flow.NewTaskIDs(waitUntilGardenerAPIServerReady, initializeVirtualClusterClient, generateAndReplicateGlobalObservabilityIngressPassword),
+			})
+			group.Add(flow.Task{
+				Name:         "Waiting until Garden Prometheus is ready",
+				Fn:           c.prometheusGarden.Wait,
+				Dependencies: flow.NewTaskIDs(deployPrometheusGarden),
+			})
+
+			deployPrometheusLongTerm := group.Add(flow.Task{
+				Name: "Deploying long-term Prometheus",
+				Fn: func(ctx context.Context) error {
+					return r.deployLongTermPrometheus(ctx, c.prometheusLongTerm)
+				},
+				Dependencies: flow.NewTaskIDs(deployPrometheusGarden),
+			})
+			group.Add(flow.Task{
+				Name:         "Waiting until long-term Prometheus is ready",
+				Fn:           c.prometheusLongTerm.Wait,
+				Dependencies: flow.NewTaskIDs(deployPrometheusLongTerm),
+			})
+
+			group.Add(flow.Task{
+				Name:         "Deploying blackbox-exporter",
+				Fn:           c.blackboxExporter.Deploy,
+				Dependencies: flow.NewTaskIDs(waitUntilKubeAPIServerIsReady, deployPrometheusGarden),
+			})
+
+			deployPlutono := group.Add(flow.Task{
+				Name:         "Deploying Plutono",
+				Fn:           c.plutono.Deploy,
+				Dependencies: flow.NewTaskIDs(generateObservabilityIngressPassword),
+			})
+			group.Add(flow.Task{
+				Name:         "Waiting until Plutono is ready",
+				Fn:           c.plutono.Wait,
+				Dependencies: flow.NewTaskIDs(deployPlutono),
+			})
+
+			deployPerses := group.Add(flow.Task{
+				Name:         "Deploying Perses",
+				Fn:           c.perses.Deploy,
+				Dependencies: flow.NewTaskIDs(generateObservabilityIngressPassword),
+			})
+			group.Add(flow.Task{
+				Name:         "Waiting until Perses is ready",
+				Fn:           c.perses.Wait,
+				Dependencies: flow.NewTaskIDs(deployPerses),
+			})
+
+			return group.SkipIf(!monitoringEnabled)
+		}())
+		destroySeedMonitoring = g.AddGroup(
+			flow.NewTaskGroup("Destroying monitoring",
+				flow.Task{Name: "Destroying Alertmanager", Fn: c.alertManager.Destroy},
+				flow.Task{Name: "Destroying Garden Prometheus", Fn: c.prometheusGarden.Destroy},
+				flow.Task{Name: "Destroying long-term Prometheus", Fn: c.prometheusLongTerm.Destroy},
+				flow.Task{Name: "Destroying blackbox-exporter", Fn: component.OpDestroyAndWait(c.blackboxExporter).Destroy},
+				flow.Task{Name: "Destroying Plutono", Fn: component.OpDestroyAndWait(c.plutono).Destroy},
+				flow.Task{Name: "Destroying Perses", Fn: component.OpDestroyAndWait(c.perses).Destroy},
+			).SkipIf(monitoringEnabled),
+		)
 		_ = g.Add(flow.Task{
 			Name:         "Deploying Kube State Metrics",
 			Fn:           c.kubeStateMetrics.Deploy,
@@ -811,30 +881,10 @@ func (r *Reconciler) reconcile(
 			Fn:           c.gardenerMetricsExporter.Deploy,
 			Dependencies: flow.NewTaskIDs(waitUntilKubeAPIServerIsReady, waitUntilGardenerAPIServerReady),
 		})
-		deployPlutono = g.Add(flow.Task{
-			Name:         "Deploying Plutono",
-			Fn:           c.plutono.Deploy,
-			Dependencies: flow.NewTaskIDs(generateObservabilityIngressPassword),
-		})
-		waitUntilPlutonoReady = g.Add(flow.Task{
-			Name:         "Waiting until Plutono is ready",
-			Fn:           c.plutono.Wait,
-			Dependencies: flow.NewTaskIDs(deployPlutono),
-		})
-		deployPerses = g.Add(flow.Task{
-			Name:         "Deploying Perses",
-			Fn:           c.perses.Deploy,
-			Dependencies: flow.NewTaskIDs(generateObservabilityIngressPassword),
-		})
-		waitUntilPersesReady = g.Add(flow.Task{
-			Name:         "Waiting until Perses is ready",
-			Fn:           c.perses.Wait,
-			Dependencies: flow.NewTaskIDs(deployPerses),
-		})
 		_ = g.Add(flow.Task{
 			Name:         "Deploying istio-basic-auth-server",
 			Fn:           c.istioBasicAuthServer.Deploy,
-			Dependencies: flow.NewTaskIDs(waitUntilAlertmanagerReady, waitUntilPrometheusGardenReady, waitUntilPrometheusLongTermReady, waitUntilPlutonoReady, waitUntilPersesReady),
+			Dependencies: flow.NewTaskIDs(deploySeedMonitoring, destroySeedMonitoring),
 		})
 		_ = g.Add(flow.Task{
 			Name: "Deploying perses-operator",
@@ -847,7 +897,7 @@ func (r *Reconciler) reconcile(
 		_ = g.Add(flow.Task{
 			Name:         "Deploying pvc-autoscaler",
 			Fn:           c.pvcAutoscaler.Deploy,
-			Dependencies: flow.NewTaskIDs(waitUntilPrometheusGardenReady),
+			Dependencies: flow.NewTaskIDs(deploySeedMonitoring),
 		})
 	)
 
@@ -1172,6 +1222,9 @@ func (r *Reconciler) deployKubeAPIServerFunc(garden *operatorv1alpha1.Garden, ku
 			}
 		}
 
+		if ptr.Deref(garden.Spec.VirtualCluster.ETCD.Events.Disabled, false) {
+			kubeAPIServer.SetETCDEventsDisabled(true)
+		}
 		return shared.DeployKubeAPIServer(
 			ctx,
 			r.RuntimeClientSet.APIReader(),

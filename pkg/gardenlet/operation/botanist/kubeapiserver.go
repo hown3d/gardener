@@ -81,7 +81,7 @@ func (b *Botanist) computeKubeAPIServerAutoscalingConfig() kubeapiserver.Autosca
 		// The HA webhook sets at least 2 replicas to components of type "server" (w/o HA or with w/ HA).
 		// Ref https://github.com/gardener/gardener/blob/master/docs/development/high-availability-of-components.md#control-plane-components.
 		// That's why minReplicas is set to 2.
-		minReplicas int32 = 2
+		minReplicas int32 = 1
 		maxReplicas int32 = 6
 		minAllowed  corev1.ResourceList
 	)
@@ -187,6 +187,10 @@ func (b *Botanist) DeployKubeAPIServer(ctx context.Context) error {
 	))
 	if err != nil {
 		return fmt.Errorf("failed generating authorization webhook kubeconfig: %w", err)
+	}
+
+	if !v1beta1helper.IsETCDEventsEnabled(b.Shoot.GetInfo().Spec.Kubernetes.ETCD) {
+		b.Shoot.Components.ControlPlane.KubeAPIServer.SetETCDEventsDisabled(true)
 	}
 
 	b.Shoot.Components.ControlPlane.KubeAPIServer.AppendAuthorizationWebhook(

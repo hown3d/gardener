@@ -345,6 +345,11 @@ func (in ETCDEncryptionKeyRotation) OpenAPIModelName() string {
 }
 
 // OpenAPIModelName returns the OpenAPI model name for this type.
+func (in ETCDEventsConfig) OpenAPIModelName() string {
+	return "com.github.gardener.gardener.pkg.apis.core.v1beta1.ETCDEventsConfig"
+}
+
+// OpenAPIModelName returns the OpenAPI model name for this type.
 func (in EncryptionAtRest) OpenAPIModelName() string {
 	return "com.github.gardener.gardener.pkg.apis.core.v1beta1.EncryptionAtRest"
 }

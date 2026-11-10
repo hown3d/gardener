@@ -267,9 +267,13 @@ func (r *Reconciler) instantiateComponents(
 	if err != nil {
 		return
 	}
-	c.etcdEvents, err = r.newEtcd(log, garden, secretsManager, v1beta1constants.ETCDRoleEvents, etcd.ClassNormal)
-	if err != nil {
-		return
+	if !ptr.Deref(garden.Spec.VirtualCluster.ETCD.Events.Disabled, false) {
+		c.etcdEvents, err = r.newEtcd(log, garden, secretsManager, v1beta1constants.ETCDRoleEvents, etcd.ClassNormal)
+		if err != nil {
+			return
+		}
+	} else {
+		c.etcdEvents = etcd.NewNoOp()
 	}
 	c.kubeAPIServerService, err = r.newKubeAPIServerService(log, garden, c.istio.GetValues().IngressGateway)
 	if err != nil {
@@ -345,7 +349,7 @@ func (r *Reconciler) instantiateComponents(
 	if err != nil {
 		return
 	}
-	c.fluentOperatorCustomResources, err = r.newFluentCustomResources()
+	c.fluentOperatorCustomResources, err = r.newFluentCustomResources(garden.Spec.RuntimeCluster.Settings)
 	if err != nil {
 		return
 	}
@@ -794,7 +798,7 @@ func (r *Reconciler) newKubeAPIServer(
 }
 
 func gardenerAPIServerAutoscalingConfig(garden *operatorv1alpha1.Garden) gardenerapiserver.AutoscalingConfig {
-	replicas := int32(2)
+	replicas := int32(1)
 	if helper.HighAvailabilityEnabled(garden) {
 		replicas = 3
 	}
@@ -811,7 +815,7 @@ func gardenerAPIServerAutoscalingConfig(garden *operatorv1alpha1.Garden) gardene
 }
 
 func kubeAPIServerAutoscalingConfig(garden *operatorv1alpha1.Garden) kubeapiserver.AutoscalingConfig {
-	minReplicas := int32(2)
+	minReplicas := int32(1)
 	if helper.HighAvailabilityEnabled(garden) {
 		minReplicas = 3
 	}
@@ -1452,16 +1456,18 @@ func (r *Reconciler) newFluentBit() (component.DeployWaiter, error) {
 	)
 }
 
-func (r *Reconciler) newFluentCustomResources() (component.DeployWaiter, error) {
+func (r *Reconciler) newFluentCustomResources(settings *operatorv1alpha1.Settings) (component.DeployWaiter, error) {
 	customResourcesLabels := map[string]string{v1beta1constants.LabelKeyCustomLoggingResource: v1beta1constants.LabelValueCustomLoggingResource}
 
-	// The gardener-operator has no option to disable logging, so the default output is always included.
-	outputs := []*fluentbitv1alpha2.ClusterOutput{fluentcustomresources.GetDefaultClusterOutput(customResourcesLabels)}
+	var outputs []*fluentbitv1alpha2.ClusterOutput
+	if isValiEnabled(settings) || features.DefaultFeatureGate.Enabled(features.OpenTelemetryCollector) {
+		outputs = append(outputs, fluentcustomresources.GetDefaultClusterOutput(customResourcesLabels))
 
-	if features.DefaultFeatureGate.Enabled(features.OpenTelemetryCollector) {
-		outputs = append(outputs, fluentcustomresources.GetDynamicClusterOutput(customResourcesLabels))
-	} else {
-		outputs = append(outputs, fluentcustomresources.GetStaticClusterOutput(customResourcesLabels))
+		if features.DefaultFeatureGate.Enabled(features.OpenTelemetryCollector) {
+			outputs = append(outputs, fluentcustomresources.GetDynamicClusterOutput(customResourcesLabels))
+		} else {
+			outputs = append(outputs, fluentcustomresources.GetStaticClusterOutput(customResourcesLabels))
+		}
 	}
 
 	return sharedcomponent.NewFluentOperatorCustomResources(
@@ -1774,7 +1780,7 @@ func (r *Reconciler) newPerses(garden *operatorv1alpha1.Garden, secretsManager s
 			// configuring a pod priority class on the Perses resource (see github.com/perses/perses-operator/pull/456).
 			IsGardenCluster:     true,
 			VPAEnabled:          vpaEnabled(garden.Spec.RuntimeCluster.Settings),
-			VictoriaLogsEnabled: features.DefaultFeatureGate.Enabled(features.VictoriaLogsBackend),
+			VictoriaLogsEnabled: isVictoriaLogsEnabled(garden.Spec.RuntimeCluster.Settings),
 			// The garden runtime cluster runs istio, so include its dashboards.
 			IncludeIstioDashboards: true,
 			ExternalExposure: &perses.ExposureValues{

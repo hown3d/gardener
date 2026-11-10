@@ -34,7 +34,7 @@ func NewKubeStateMetrics(
 		ClusterType:       component.ClusterTypeSeed,
 		Image:             image.String(),
 		PriorityClassName: priorityClassName,
-		Replicas:          2,
+		Replicas:          1, // ugly but ok
 		NameSuffix:        nameSuffix,
 	}), nil
 }

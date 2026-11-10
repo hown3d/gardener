@@ -682,6 +682,45 @@ func vpaEnabled(settings *operatorv1alpha1.Settings) bool {
 	return false
 }
 
+// isSeedMonitoringEnabled returns true if the seed monitoring stack is enabled. Default is enabled.
+func isSeedMonitoringEnabled(settings *operatorv1alpha1.Settings) bool {
+	if settings != nil && settings.Monitoring != nil {
+		return ptr.Deref(settings.Monitoring.Enabled, true)
+	}
+	return true
+}
+
+// isLoggingEnabled returns true if the logging stack is enabled. Default is enabled.
+func isLoggingEnabled(settings *operatorv1alpha1.Settings) bool {
+	if settings != nil && settings.Logging != nil {
+		return ptr.Deref(settings.Logging.Enabled, true)
+	}
+	return true
+}
+
+// isValiEnabled returns true if the logging stack and Vali are enabled. Default is enabled.
+func isValiEnabled(settings *operatorv1alpha1.Settings) bool {
+	if !isLoggingEnabled(settings) {
+		return false
+	}
+	if settings != nil && settings.Logging != nil && settings.Logging.Vali != nil {
+		return ptr.Deref(settings.Logging.Vali.Enabled, true)
+	}
+	return true
+}
+
+// isVictoriaLogsEnabled returns true if the logging stack and VictoriaLogs are enabled and the VictoriaLogsBackend
+// feature gate is turned on. Default is enabled.
+func isVictoriaLogsEnabled(settings *operatorv1alpha1.Settings) bool {
+	if !isLoggingEnabled(settings) || !features.DefaultFeatureGate.Enabled(features.VictoriaLogsBackend) {
+		return false
+	}
+	if settings != nil && settings.Logging != nil && settings.Logging.VictoriaLogs != nil {
+		return ptr.Deref(settings.Logging.VictoriaLogs.Enabled, true)
+	}
+	return true
+}
+
 func pvcAutoscalerEnabled(settings *operatorv1alpha1.Settings) bool {
 	return settings != nil &&
 		settings.PersistentVolumeClaimAutoscaler != nil &&

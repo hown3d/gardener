@@ -75,6 +75,15 @@ func IsMonitoringEnabled(c *gardenletconfigv1alpha1.GardenletConfiguration) bool
 	return true
 }
 
+// IsSeedMonitoringEnabled returns true if the monitoring stack for seed clusters is enabled. Default is enabled.
+func IsSeedMonitoringEnabled(c *gardenletconfigv1alpha1.GardenletConfiguration) bool {
+	if c != nil && c.Monitoring != nil && c.Monitoring.Seed != nil &&
+		c.Monitoring.Seed.Enabled != nil {
+		return *c.Monitoring.Seed.Enabled
+	}
+	return true
+}
+
 // GetManagedResourceProgressingThreshold returns ManagedResourceProgressingThreshold if set otherwise it returns nil.
 func GetManagedResourceProgressingThreshold(c *gardenletconfigv1alpha1.GardenletConfiguration) *metav1.Duration {
 	if c != nil && c.Controllers != nil && c.Controllers.ShootCare != nil && c.Controllers.ShootCare.ManagedResourceProgressingThreshold != nil {

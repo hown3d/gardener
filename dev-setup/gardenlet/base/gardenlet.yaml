@@ -1,4 +1,3 @@
----
 apiVersion: seedmanagement.gardener.cloud/v1alpha1
 kind: Gardenlet
 metadata:
@@ -18,19 +17,24 @@ spec:
       LiveControlPlaneMigration: true
     controllers:
       shoot:
-        reconcileInMaintenanceOnly: true
+        reconcileInMaintenanceOnly: false
         respectSyncPeriodOverwrite: true
       shootState:
         concurrentSyncs: 0 # we don't need the shootstate controller locally, and enabling it would even distort the results of CPM e2e tests
     etcdConfig:
       featureGates:
         UpgradeEtcdVersion: true
+    monitoring:
+      seed:
+        enabled: false
+      shoot:
+        enabled: false
     logging:
-      enabled: true
+      enabled: false
       vali:
-        enabled: true
+        enabled: false
       victoriaLogs:
-        enabled: true
+        enabled: false
       shootNodeLogging:
         shootPurposes:
           - infrastructure

@@ -140,10 +140,14 @@ func (b *Botanist) DeployEtcd(ctx context.Context) error {
 	).Has(v1beta1helper.GetShootCARotationPhase(b.Shoot.GetInfo().Status.Credentials)) {
 		var taskFns []flow.TaskFn
 
-		for name, component := range map[string]etcd.Interface{
-			"etcd-main":   b.Shoot.Components.ControlPlane.EtcdMain,
-			"etcd-events": b.Shoot.Components.ControlPlane.EtcdEvents,
-		} {
+		// here
+		etcds := map[string]etcd.Interface{
+			"etcd-main": b.Shoot.Components.ControlPlane.EtcdMain,
+		}
+		if v1beta1helper.IsETCDEventsEnabled(b.Shoot.GetInfo().Spec.Kubernetes.ETCD) {
+			etcds["etcd-events"] = b.Shoot.Components.ControlPlane.EtcdEvents
+		}
+		for name, component := range etcds {
 			if peerCARolloutCompleted, err := component.IsPeerCARolledOut(ctx); err != nil {
 				return fmt.Errorf("failed to check if peer CA rollout is completed for %s: %w", name, err)
 			} else if !peerCARolloutCompleted {
@@ -251,6 +255,7 @@ func (b *Botanist) deployOrRestoreEtcd(ctx context.Context) error {
 		return b.restoreMultiNodeEtcd(ctx)
 	}
 
+	// here
 	return flow.Parallel(
 		b.Shoot.Components.ControlPlane.EtcdMain.Deploy,
 		b.Shoot.Components.ControlPlane.EtcdEvents.Deploy,
