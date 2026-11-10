@@ -20,3 +20,5 @@ spec:
         # from the machine pod IPs anymore.
         - name: CALICO_IPV4POOL_CIDR
           value: "10.1.0.0/16"
+        - name: IP_AUTODETECTION_METHOD
+          value: "interface=eth.*"
