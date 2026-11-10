@@ -16,6 +16,7 @@ import (
 	"github.com/gardener/machine-controller-manager/pkg/util/provider/machinecodes/codes"
 	"github.com/gardener/machine-controller-manager/pkg/util/provider/machinecodes/status"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
@@ -131,7 +132,7 @@ func (d *localDriver) applyPod(
 	error,
 ) {
 	pod := podForMachine(req.Machine, req.MachineClass, providerSpec)
-	
+
 	podCIDRs, err := json.Marshal(providerSpec.PodCIDRs)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling podCIDRs: %w", err)
@@ -207,6 +208,17 @@ func (d *localDriver) applyPod(
 				}},
 			},
 		},
+		// Spread machine pods across the (kind) nodes so that they don't all get packed onto a single node. This is a
+		// soft constraint (ScheduleAnyway): if there are more machines than nodes, extra pods still get scheduled
+		// instead of staying Pending.
+		TopologySpreadConstraints: []corev1.TopologySpreadConstraint{{
+			MaxSkew:           1,
+			TopologyKey:       "kubernetes.io/hostname",
+			WhenUnsatisfiable: corev1.ScheduleAnyway,
+			LabelSelector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{labelKeyApp: labelValueMachine},
+			},
+		}},
 		// Don't use the coredns of the kind cluster. The machine pods should not rely on in-cluster DNS at all because
 		// in the real world, shoot nodes also can't resolve DNS names of the seed (obviously). Using the DNS config of
 		// the kind cluster nodes means that the machine pods will talk directly to the local DNS server (bind9) running
