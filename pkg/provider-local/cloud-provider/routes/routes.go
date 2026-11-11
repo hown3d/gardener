@@ -191,6 +191,9 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 
 	var routeErr error
 	for _, pod := range machinePodList.Items {
+		if pod.Spec.NodeName == "" {
+			return fmt.Errorf("machine pod %s is not yet scheduled", pod.Name)
+		}
 		podIPToInfo[pod.Status.PodIP] = podInfo{
 			NodeName: pod.Spec.NodeName,
 			Name:     pod.Name,
@@ -244,7 +247,10 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 				return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
 			}
 		} else {
-			tunnelInfo := nodeTunnelMap[destinationInfo.NodeName]
+			tunnelInfo, ok := nodeTunnelMap[destinationInfo.NodeName]
+			if !ok {
+				return fmt.Errorf("tunnel map doesn't contain entry for %s", destinationInfo.NodeName)
+			}
 			log.Info("other node")
 			if err := p.ensureIPRule(ctx, containerID, vxlanDeviceName); err != nil {
 				return fmt.Errorf("ensuring vxlan ip rule on kind node %s: %w", nodeName, err)
@@ -306,8 +312,8 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 					iproute.Gateway = nodeIP.String()
 					targetNode = podName
 				} else {
-					klog.Infof("gateway %s is not a node", gateway)
-					continue
+					klog.Infof("gateway %s is not a live node, reporting stale route for deletion", gateway)
+					targetNode = gateway.String()
 				}
 			}
 			nodeRouteSet = nodeRouteSet.Insert(route{
@@ -424,7 +430,11 @@ func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, ifname str
 
 // ensureIPRoute ensures an ip route in the outer node's container for each machine pod
 func (p *Provider) ensureIPRoute(ctx context.Context, op op, nodeContainerID, destinationCIDR string, nodeIP netip.Addr, dev string, onlink bool) error {
-	cmd := []string{"ip", "route", string(op), destinationCIDR, "via", nodeIP.String(), "table", strconv.Itoa(p.Config.Routes.TableID)}
+	cmd := []string{"ip", "route", string(op), destinationCIDR}
+	if nodeIP.IsValid() {
+		cmd = append(cmd, "via", nodeIP.String())
+	}
+	cmd = append(cmd, "table", strconv.Itoa(p.Config.Routes.TableID))
 	if dev != "" {
 		cmd = append(cmd, "dev", dev)
 	}
@@ -605,16 +615,15 @@ func (p *Provider) containerIDByName(ctx context.Context, name string) (string, 
 }
 
 func allocateVtepIP(nodeIndex int) (netip.Addr, error) {
-	var vtepIP netip.Addr
+	vtepIP := vtepIPPrefix.Addr()
 	for range nodeIndex {
-		vtepIP = vtepIPPrefix.Addr().Next()
+		vtepIP = vtepIP.Next()
 	}
 	if !vtepIP.IsValid() {
 		return netip.Addr{}, fmt.Errorf("getting vtep IP, allocation failed")
 	}
 	return vtepIP, nil
 }
-
 
 func allocateVtepMac(nodeIndex uint8) (net.HardwareAddr, error) {
 	if len(vtepMACBase) != 6 {
