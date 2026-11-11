@@ -37,6 +37,10 @@ var (
 	vtepIPPrefix = netip.MustParsePrefix("10.254.0.0/24")
 )
 
+// vxlanMTUSize is the MTU used for routes in the machine pod that are routed to another machine pod running on a different kind node.
+// The current base MTU is 1480 and we subtract 50 bytes for the VXLAN header
+const vxlanMTUSize = "1430"
+
 func init() {
 	var err error
 	vtepMACBase, err = net.ParseMAC("02:42:0a:fe:64:00")
@@ -101,14 +105,14 @@ const (
 )
 
 func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.Route) error {
-	var nodeInternalIP netip.Addr
+	var targetNodeInternalIP netip.Addr
 	for _, nodeAddr := range route.TargetNodeAddresses {
 		if nodeAddr.Type != corev1.NodeInternalIP {
 			continue
 		}
-		nodeInternalIP = netip.MustParseAddr(nodeAddr.Address)
+		targetNodeInternalIP = netip.MustParseAddr(nodeAddr.Address)
 	}
-	if !nodeInternalIP.IsValid() {
+	if !targetNodeInternalIP.IsValid() {
 		panic("node internal ip not found")
 	}
 
@@ -208,10 +212,14 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 		if err != nil {
 			return err
 		}
+		destinationInfo := podIPToInfo[targetNodeInternalIP.String()]
 
 		// skip route if target node is the pod itself
-		if podIP.Compare(nodeInternalIP) != 0 {
-			cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", nodeInternalIP.String(), "dev", "eth0", "onlink"}
+		if podIP.Compare(targetNodeInternalIP) != 0 {
+			cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", targetNodeInternalIP.String(), "dev", "eth0", "onlink"}
+			if destinationInfo.NodeName != nodeName {
+				cmd = append(cmd, "mtu", vxlanMTUSize)
+			}
 			log.Info("modifyRoute", "cmd", strings.Join(cmd, " "))
 			_, _, err = p.executeCommandInPod(ctx, podName, cmd)
 			if err != nil {
@@ -221,7 +229,6 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 			}
 		}
 
-		destinationInfo := podIPToInfo[nodeInternalIP.String()]
 		containerID, err := p.containerIDByName(ctx, nodeName)
 		if err != nil {
 			return err
@@ -243,7 +250,7 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 				return fmt.Errorf("ensuring ip rule on kind node %s: %w", nodeName, err)
 			}
 
-			if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, nodeInternalIP, "", false); err != nil {
+			if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, targetNodeInternalIP, "", false); err != nil {
 				return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
 			}
 		} else {
