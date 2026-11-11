@@ -30,7 +30,20 @@ import (
 	"k8s.io/klog/v2"
 )
 
-var ClusterCIDR netip.Prefix
+var (
+	ClusterCIDR netip.Prefix
+
+	vtepMACBase  net.HardwareAddr
+	vtepIPPrefix = netip.MustParsePrefix("10.254.0.0/24")
+)
+
+func init() {
+	var err error
+	vtepMACBase, err = net.ParseMAC("02:42:0a:fe:64:00")
+	if err != nil {
+		panic(err)
+	}
+}
 
 // Provider implements the cloudprovider.LoadBalancer interface for the cloud-provider-local.
 type Provider struct {
@@ -161,7 +174,7 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 			})
 			if err != nil {
 				if !isFileAlreadyExists(err) {
-				return fmt.Errorf("setting neighbor for tunnel ip: %w", err)
+					return fmt.Errorf("setting neighbor for tunnel ip: %w", err)
 				}
 			}
 
@@ -195,14 +208,14 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 
 		// skip route if target node is the pod itself
 		if podIP.Compare(nodeInternalIP) != 0 {
-		cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", nodeInternalIP.String(), "dev", "eth0", "onlink"}
-		log.Info("modifyRoute", "cmd", strings.Join(cmd, " "))
-		_, _, err = p.executeCommandInPod(ctx, podName, cmd)
-		if err != nil {
-			if !isFileAlreadyExists(err) {
-			routeErr = errors.Join(routeErr, fmt.Errorf("adding route in pod %s: %w", podName, err))
+			cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", nodeInternalIP.String(), "dev", "eth0", "onlink"}
+			log.Info("modifyRoute", "cmd", strings.Join(cmd, " "))
+			_, _, err = p.executeCommandInPod(ctx, podName, cmd)
+			if err != nil {
+				if !isFileAlreadyExists(err) {
+					routeErr = errors.Join(routeErr, fmt.Errorf("adding route in pod %s: %w", podName, err))
+				}
 			}
-		}
 		}
 
 		destinationInfo := podIPToInfo[nodeInternalIP.String()]
@@ -436,33 +449,39 @@ func (p *Provider) ensureVXLANDevice(ctx context.Context, nodeContainerID, devic
 		}
 	}
 
-	vxlanMac, _ := net.ParseMAC(fmt.Sprintf("02:42:0a:fe:64:0%d", index))
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "address", vxlanMac.String()})
+	vtepMac, err := allocateVtepMac(uint8(index))
+	if err != nil {
+		return netip.Addr{}, vtepMac, fmt.Errorf("allocating vtep mac: %w", err)
+	}
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "address", vtepMac.String()})
 	if err != nil {
 		if !isFileAlreadyExists(err) {
-			return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("set mac address for vxlan device: %w", err)
+			return netip.Addr{}, vtepMac, fmt.Errorf("set mac address for vxlan device: %w", err)
 		}
 	}
 
-	vxlanTunnelIP := netip.MustParseAddr(fmt.Sprintf("10.254.100.%d", index))
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "addr", "add", vxlanTunnelIP.String() + "/24", "dev", deviceName})
+	vtepIP, err := allocateVtepIP(index)
+	if err != nil {
+		return vtepIP, vtepMac, fmt.Errorf("allocating vtep IP: %w", err)
+	}
+	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "addr", "add", netip.PrefixFrom(vtepIP, 32).String(), "dev", "lo"})
 	if err != nil {
 		if !isAddressAlreadyAssigned(err) {
-			return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("setting ip %s on vxlan device %s: %w", vxlanTunnelIP, deviceName, err)
+			return vtepIP, vtepMac, fmt.Errorf("setting ip %s on loopback device %s: %w", vtepIP, deviceName, err)
 		}
 	}
 
 	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "up"})
 	if err != nil {
-		return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("setting vxlan device up: %w", err)
+		return vtepIP, vtepMac, fmt.Errorf("setting vxlan device up: %w", err)
 	}
 
 	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", deviceName)})
 	if err != nil {
-		return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("disable rpfilter on vxlan device: %w", err)
+		return vtepIP, vtepMac, fmt.Errorf("disable rpfilter on vxlan device: %w", err)
 	}
 
-	return vxlanTunnelIP, vxlanMac, nil
+	return vtepIP, vtepMac, nil
 }
 
 func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
@@ -481,7 +500,6 @@ func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
 	}
 	return m, nil
 }
-
 
 type ipLink struct {
 	IfIndex   int    `json:"ifindex"`
@@ -584,6 +602,27 @@ func (p *Provider) containerIDByName(ctx context.Context, name string) (string, 
 		}
 	}
 	return "", fmt.Errorf("container with name %s not found", name)
+}
+
+func allocateVtepIP(nodeIndex int) (netip.Addr, error) {
+	var vtepIP netip.Addr
+	for range nodeIndex {
+		vtepIP = vtepIPPrefix.Addr().Next()
+	}
+	if !vtepIP.IsValid() {
+		return netip.Addr{}, fmt.Errorf("getting vtep IP, allocation failed")
+	}
+	return vtepIP, nil
+}
+
+
+func allocateVtepMac(nodeIndex uint8) (net.HardwareAddr, error) {
+	if len(vtepMACBase) != 6 {
+		return net.HardwareAddr{}, fmt.Errorf("malformed base mac %s", vtepMACBase)
+	}
+	base := [6]byte(vtepMACBase)
+	base[5] = nodeIndex
+	return net.HardwareAddr(base[:]), nil
 }
 
 func getNodeInternalIP(node *corev1.Node) (netip.Addr, error) {
