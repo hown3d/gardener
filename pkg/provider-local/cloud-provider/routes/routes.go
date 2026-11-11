@@ -275,10 +275,10 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 
 	routeSet := sets.New[route]()
 
-	for nodeIP, node := range nodeMap {
-		ipRoutes, err := p.listIPRoutes(ctx, node)
+	for nodeIP, podName := range nodeMap {
+		ipRoutes, err := p.listIPRoutes(ctx, podName)
 		if err != nil {
-			return nil, fmt.Errorf("list ip routes of pod %s: %w", node, err)
+			return nil, fmt.Errorf("list ip routes of pod %s: %w", podName, err)
 		}
 
 		nodeRouteSet := sets.New[route]()
@@ -304,7 +304,7 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 			if !ok {
 				if iproute.Device == "cilium_host" {
 					iproute.Gateway = nodeIP.String()
-					targetNode = node
+					targetNode = podName
 				} else {
 					klog.Infof("gateway %s is not a node", gateway)
 					continue
@@ -322,13 +322,13 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 		if routeSet.Len() == 0 {
 			routeSet = nodeRouteSet
 		} else {
-			routeSet = nodeRouteSet.Intersection(routeSet)
+			routeSet = nodeRouteSet.Union(routeSet)
 		}
 
-		klog.V(1).InfoS("new route set after intersection",
+		klog.V(1).InfoS("new route set after union",
 			"routeSet", routeSet.UnsortedList(),
 			"nodeRouteSet", nodeRouteSet.UnsortedList(),
-			"node", node)
+			"node", podName)
 	}
 
 	routeList := routeSet.UnsortedList()
