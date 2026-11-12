@@ -276,7 +276,7 @@ func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) 
 			if destinationInfo.NodeName != nodeName {
 				mtu = vxlanMTUSize
 			}
-			if err := p.createIPRoute(ctx, p.podExecutor, machinePodName, route.DestinationCIDR, mtu, "eth0", targetNodeInternalIP, true); err != nil {
+			if err := p.createIPRoute(ctx, p.podExecutor, machinePodName, route.DestinationCIDR, mtu, "eth0", "", targetNodeInternalIP, true); err != nil {
 				return fmt.Errorf("create route in machine pod %s: %w", machinePodName, err)
 			}
 		}
