@@ -41,7 +41,9 @@ func (p *podExecutor) Execute(ctx context.Context, name string, cmd []string) (s
 	stdout, stderr, err = p.pe.Execute(ctx, p.namespace, name, "", cmd...)
 	if err != nil {
 		if exitErr, ok := errors.AsType[exec.CodeExitError](err); ok && exitErr.Exited() {
-			return nil, nil, processError{code: exitErr.Code, stderr: stderr, stdout: stdout}
+			stdoutBytes, _ := io.ReadAll(stdout)
+			stderrBytes, _ := io.ReadAll(stderr)
+			return nil, nil, processError{code: exitErr.Code, stderr: stderrBytes, stdout: stdoutBytes}
 		}
 		return nil, nil, err
 	}
@@ -91,7 +93,7 @@ func (p *containerExecutor) Execute(ctx context.Context, name string, cmd []stri
 		return nil, nil, fmt.Errorf("exec inspect: %w", err)
 	}
 	if inspectRes.ExitCode != 0 {
-		return nil, nil, processError{code: inspectRes.ExitCode, stderr: &stderr, stdout: &stdout}
+		return nil, nil, processError{code: inspectRes.ExitCode, stderr: stderr.Bytes(), stdout: stdout.Bytes()}
 	}
 	return &stdout, &stderr, nil
 }
