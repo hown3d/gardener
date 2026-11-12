@@ -6,6 +6,7 @@ package infrastructure
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -50,7 +51,7 @@ func (a *actuator) Reconcile(ctx context.Context, _ logr.Logger, infrastructure 
 
 	ipPools := []client.Object{}
 	for _, ipFamily := range cluster.Shoot.Spec.Networking.IPFamilies {
-		ipPoolObj, err := ipPool(machineNamespace, cluster.Shoot.Status.TechnicalID, string(ipFamily), *cluster.Shoot.Spec.Networking.Nodes)
+		ipPoolObj, err := ipPool(machineNamespace, cluster.Shoot.Status.TechnicalID, string(ipFamily), *cluster.Shoot.Spec.Networking.Nodes, isShootUsingOverlay(cluster.Shoot.Spec.Networking))
 		if err != nil {
 			return err
 		}
@@ -135,9 +136,9 @@ func IPPoolName(technicalID, ipFamily string) string {
 	return "shoot-machine-pods-" + technicalID + "-" + strings.ToLower(ipFamily)
 }
 
-func ipPool(machineNamespace *corev1.Namespace, technicalID string, ipFamily, nodeCIDR string) (client.Object, error) {
+func ipPool(machineNamespace *corev1.Namespace, technicalID string, ipFamily, nodeCIDR string, shootUsesOverlay bool) (client.Object, error) {
 	ipipMode := "Always"
-	if ipFamily == string(gardencorev1beta1.IPFamilyIPv6) {
+	if ipFamily == string(gardencorev1beta1.IPFamilyIPv6) || !shootUsesOverlay {
 		ipipMode = "Never"
 	}
 	obj, err := kubernetes.NewManifestReader([]byte(`apiVersion: crd.projectcalico.org/v1
@@ -163,4 +164,23 @@ spec:
 		UID:        machineNamespace.UID,
 	}})
 	return obj, nil
+}
+
+func isShootUsingOverlay(network *gardencorev1beta1.Networking) bool {
+	// overlay is enabled by default
+	if network.ProviderConfig == nil {
+		return true
+	}
+
+	type networkConfig struct {
+		Overlay struct {
+			Enabled bool `json:"false"`
+		} `json:"overlay"`
+	}
+
+	var conf networkConfig
+	if err := json.Unmarshal(network.ProviderConfig.Raw, &conf); err != nil {
+		return true
+	}
+	return conf.Overlay.Enabled
 }
