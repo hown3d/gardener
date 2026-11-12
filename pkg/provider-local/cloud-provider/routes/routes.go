@@ -288,9 +288,12 @@ func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) 
 			}
 		} else {
 			log.Info("other node")
+			if destinationInfo.NodeName == "" {
+				return fmt.Errorf("no machine pod known for target node internal IP %s (route %s)", targetNodeInternalIP, route.DestinationCIDR)
+			}
 			tunnelInfo, ok := nodeTunnelMap[destinationInfo.NodeName]
 			if !ok {
-				return fmt.Errorf("tunnel map doesn't contain entry for %s", destinationInfo.NodeName)
+				return fmt.Errorf("tunnel map doesn't contain entry for destination node %s", destinationInfo.NodeName)
 			}
 			if err := p.ensureRouteTargetMachineOnOtherKindNode(ctx, nodeName, nodeName, route.DestinationCIDR, tunnelInfo.tunnelIP); err != nil {
 				return fmt.Errorf("ensuring route to other kind node: %w", err)
