@@ -270,17 +270,6 @@ func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) 
 		}
 		destinationInfo := podIPToInfo[targetNodeInternalIP.String()]
 
-		// skip route if target node is the pod itself
-		if podIP.Compare(targetNodeInternalIP) != 0 {
-			var mtu string
-			if destinationInfo.NodeName != nodeName {
-				mtu = vxlanMTUSize
-			}
-			if err := p.createIPRoute(ctx, p.podExecutor, machinePodName, route.DestinationCIDR, mtu, "eth0", "", targetNodeInternalIP, true); err != nil {
-				return fmt.Errorf("create route in machine pod %s: %w", machinePodName, err)
-			}
-		}
-
 		if destinationInfo.NodeName == nodeName {
 			log.Info("same node")
 			if err := p.ensureRouteTargetMachineOnSameKindNode(ctx, machinePodName, nodeName, route.DestinationCIDR, targetNodeInternalIP); err != nil {
@@ -295,8 +284,19 @@ func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) 
 			if !ok {
 				return fmt.Errorf("tunnel map doesn't contain entry for destination node %s", destinationInfo.NodeName)
 			}
-			if err := p.ensureRouteTargetMachineOnOtherKindNode(ctx, nodeName, nodeName, route.DestinationCIDR, tunnelInfo.tunnelIP); err != nil {
+			if err := p.ensureRouteTargetMachineOnOtherKindNode(ctx, nodeName, nodeName, route.DestinationCIDR, tunnelInfo.tunnelIP, targetNodeInternalIP); err != nil {
 				return fmt.Errorf("ensuring route to other kind node: %w", err)
+			}
+		}
+
+		// skip route if target node is the pod itself
+		if podIP.Compare(targetNodeInternalIP) != 0 {
+			var mtu string
+			if destinationInfo.NodeName != nodeName {
+				mtu = vxlanMTUSize
+			}
+			if err := p.createIPRoute(ctx, p.podExecutor, machinePodName, route.DestinationCIDR, mtu, "eth0", "", targetNodeInternalIP, true); err != nil {
+				return fmt.Errorf("create route in machine pod %s: %w", machinePodName, err)
 			}
 		}
 	}
@@ -327,11 +327,20 @@ func (p *Provider) ensureRouteTargetMachineOnSameKindNode(ctx context.Context, m
 }
 
 // ensureRouteTargetMachineOnOtherKindNode sets up a route for destinationCIDR through the vxlan device for nodeName using tunnelIP of the remote kind node
-func (p *Provider) ensureRouteTargetMachineOnOtherKindNode(ctx context.Context, nodeName, kindNodeContainerID, destinationCIDR string, tunnelIP netip.Addr) error {
-	if err := p.ensureIPRuleOnKindNode(ctx, kindNodeContainerID, p.vxlanDeviceName); err != nil {
+func (p *Provider) ensureRouteTargetMachineOnOtherKindNode(ctx context.Context, nodeName, kindNodeName, destinationCIDR string, tunnelIP, remoteMachinePodIP netip.Addr) error {
+	if err := p.ensureIPRuleOnKindNode(ctx, kindNodeName, p.vxlanDeviceName); err != nil {
 		return fmt.Errorf("ensuring vxlan ip rule on kind node %s: %w", nodeName, err)
 	}
-	if err := p.ensureIPRouteOnKindNode(ctx, kindNodeContainerID, destinationCIDR, tunnelIP, p.vxlanDeviceName, true); err != nil {
+	if err := p.ensureIPRouteOnKindNode(ctx, kindNodeName, destinationCIDR, tunnelIP, p.vxlanDeviceName, true); err != nil {
+		return fmt.Errorf("ensuring vxlan ip route on kind node %s: %w", nodeName, err)
+	}
+
+	// create a route for the node IP (machine pod IP) to ensure requests from pods to the node IP are also encapsulated
+	if err := p.createIPRoute(ctx, p.containerExecutor, kindNodeName, remoteMachinePodIP.String(), "", p.vxlanDeviceName, p.tableID, tunnelIP, true); err != nil {
+		return fmt.Errorf("creating vxlan ip route to machine pod IP %s on kind node %s")
+	}
+
+	if err := p.ensureIPRouteOnKindNode(ctx, kindNodeName, destinationCIDR, tunnelIP, p.vxlanDeviceName, true); err != nil {
 		return fmt.Errorf("ensuring vxlan ip route on kind node %s: %w", nodeName, err)
 	}
 	return nil
