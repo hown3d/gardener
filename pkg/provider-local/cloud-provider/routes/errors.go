@@ -41,15 +41,12 @@ func isFileAlreadyExists(err error) bool {
 }
 
 func processErrorStderr(perr *processError) ([]byte, error) {
-	cacheBuffer := new(bytes.Buffer)
-	// TeeReader returns a Reader that writes to cacheBuffer whatever it reads from originalReader.
-	stderr := io.TeeReader(perr.stderr, cacheBuffer)
-	stdout, err := io.ReadAll(stderr)
+	out, err := io.ReadAll(perr.stderr)
 	if err != nil {
 		return nil, err
 	}
-	perr.stderr = cacheBuffer
-	return stdout, err
+	perr.stderr = bytes.NewReader(out)
+	return out, err
 }
 
 func isAddressAlreadyAssigned(err error) bool {
