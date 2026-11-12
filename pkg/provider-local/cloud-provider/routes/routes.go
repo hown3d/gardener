@@ -1,325 +1,66 @@
 package routes
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/netip"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/gardener/gardener/pkg/client/kubernetes"
-	cloudproviderv1alpha1 "github.com/gardener/gardener/pkg/provider-local/cloud-provider/api/v1alpha1"
 	"github.com/gardener/gardener/pkg/provider-local/cloud-provider/helper"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 	dockerclient "github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/stdcopy"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/client-go/util/exec"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/klog/v2"
 )
 
 var (
 	ClusterCIDR netip.Prefix
-
-	vtepMACBase  net.HardwareAddr
-	vtepIPPrefix = netip.MustParsePrefix("10.254.0.0/24")
 )
 
-// vxlanMTUSize is the MTU used for routes in the machine pod that are routed to another machine pod running on a different kind node.
-// The current base MTU is 1480 and we subtract 50 bytes for the VXLAN header
-const vxlanMTUSize = "1430"
-
-func init() {
-	var err error
-	vtepMACBase, err = net.ParseMAC("02:42:0a:fe:64:00")
-	if err != nil {
-		panic(err)
+func NewProvider(runtimeClient client.Client, dockerClient dockerclient.APIClient, podExecutor kubernetes.PodExecutor, tableID, namespace string) *Provider {
+	return &Provider{
+		RuntimeClient:     runtimeClient,
+		containerExecutor: NewContainerExecutor(dockerClient),
+		podExecutor:       NewPodExecutor(namespace, podExecutor),
+		namespace:         namespace,
+		vxlanDeviceName:   "vxlan" + tableID,
+		tableID:           tableID,
 	}
 }
 
 // Provider implements the cloudprovider.LoadBalancer interface for the cloud-provider-local.
 type Provider struct {
-	// Config is the full config of cloud-controller-manager-local.
-	Config *cloudproviderv1alpha1.CloudProviderConfig
-
 	// RuntimeClient is a Kubernetes client for the runtime cluster (seed) of the shoot cluster, i.e., the kind cluster
 	// where the shoot machine pods run. This is only set if the cloud-controller-manager-local is running for a shoot
 	// cluster, not for the kind cluster itself.
 	RuntimeClient client.Client
 
-	// DockerClient is the client connected to the host's Docker socket.
-	DockerClient *dockerclient.Client
-
-	PodExecutor kubernetes.PodExecutor
+	namespace         string
+	containerExecutor executor
+	podExecutor       executor
+	vxlanDeviceName   string
+	tableID           string
 }
 
 // CreateRoute implements [cloudprovider.Routes].
 func (p *Provider) CreateRoute(ctx context.Context, clusterName string, nameHint string, route *cloudprovider.Route) error {
-	if err := p.createRoute(ctx, route); err != nil {
-		if isFileAlreadyExists(err) {
-			klog.Info("route already exists")
-			return nil
-		}
-		return err
-	}
-	return nil
+	return p.createRoute(ctx, route)
 }
 
 // DeleteRoute implements [cloudprovider.Routes].
 func (p *Provider) DeleteRoute(ctx context.Context, clusterName string, route *cloudprovider.Route) error {
-	if err := p.deleteRoute(ctx, route); err != nil {
-		processErr, ok := errors.AsType[processError](err)
-		if !ok {
-			return err
-		}
-
-		stdout, err := io.ReadAll(processErr.stderr)
-		if err != nil {
-			return err
-		}
-		if strings.TrimSpace(string(stdout)) == "RTNETLINK answers: No such process" {
-			klog.Info("route already gone")
-			return nil
-		}
-	}
-	return nil
-}
-
-func (p *Provider) deleteRoute(ctx context.Context, route *cloudprovider.Route) error {
-	// targetNode will be empty, as we do not know the target node name anymore since the node object is gone and also the pod is gone
-
-	machinePodList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.Config.RuntimeCluster.Namespace)
-	if err != nil {
-		return err
-	}
-
-	nodeList := &corev1.NodeList{}
-	if err := p.RuntimeClient.List(ctx, nodeList); err != nil {
-		return err
-	}
-
-	for _, machine := range machinePodList.Items {
-		cmd := []string{"ip", "route", "delete", route.DestinationCIDR}
-		_, _, err := p.executeCommandInPod(ctx, machine.Name, cmd)
-		if err != nil && !isNoSuchProcess(err) {
-			return fmt.Errorf("deleting route on machine pod %s: %w", machine.Name, err)
-		}
-	}
-
-	for _, node := range nodeList.Items {
-		containerID, err := p.containerIDByName(ctx, node.Name)
-		if err != nil {
-			return err
-		}
-		stdout, _, err := p.executeCommandInContainer(ctx, containerID, []string{"ip", "--json", "rule", "show", "table", strconv.Itoa(p.Config.Routes.TableID)})
-		if err != nil {
-			return err
-		}
-
-		var rules []ipRule
-		if err := json.NewDecoder(stdout).Decode(&rules); err != nil {
-			return err
-		}
-
-		for _, r := range rules {
-			if !r.IsIIFDetached() {
-				continue
-			}
-			_, _, err = p.executeCommandInContainer(ctx, containerID, []string{"ip", "rule", "delete", "iif", r.IIF, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
-			if err != nil {
-				return fmt.Errorf("deleting orphaned ip rule: %w", err)
-			}
-		}
-
-		_, _, err = p.executeCommandInContainer(ctx, containerID, []string{"ip", "route", "delete", route.DestinationCIDR, "table", strconv.Itoa(p.Config.Routes.TableID)})
-		if err != nil && !isNoSuchProcess(err) {
-			return fmt.Errorf("deleting ip route on kind node %s: %w", node.Name, err)
-		}
-	}
-	return nil
-}
-
-func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) error {
-	var targetNodeInternalIP netip.Addr
-	for _, nodeAddr := range route.TargetNodeAddresses {
-		if nodeAddr.Type != corev1.NodeInternalIP {
-			continue
-		}
-		targetNodeInternalIP = netip.MustParseAddr(nodeAddr.Address)
-	}
-	if !targetNodeInternalIP.IsValid() {
-		panic("node internal ip not found")
-	}
-
-	machinePodList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.Config.RuntimeCluster.Namespace)
-	if err != nil {
-		return err
-	}
-
-	nodeList := &corev1.NodeList{}
-	if err := p.RuntimeClient.List(ctx, nodeList); err != nil {
-		return err
-	}
-	type tunnelInfo struct {
-		nodeIP   netip.Addr
-		tunnelIP netip.Addr
-		mac      net.HardwareAddr
-	}
-	nodeTunnelMap := map[string]tunnelInfo{}
-
-	vxlanDeviceName := fmt.Sprintf("vxlan%d", p.Config.Routes.TableID)
-	slices.SortFunc(nodeList.Items, func(a, b corev1.Node) int {
-		return strings.Compare(a.Name, b.Name)
-	})
-	for i, node := range nodeList.Items {
-		containerID, err := p.containerIDByName(ctx, node.Name)
-		if err != nil {
-			return err
-		}
-		vxlanTunnelIP, vxlanMAC, err := p.ensureVXLANDevice(ctx, containerID, vxlanDeviceName, p.Config.Routes.TableID, i+1)
-		if err != nil {
-			return fmt.Errorf("ensuring vxlan device: %w", err)
-		}
-		nodeIP, err := getNodeInternalIP(&node)
-		if err != nil {
-			return err
-		}
-		nodeTunnelMap[node.Name] = tunnelInfo{
-			tunnelIP: vxlanTunnelIP,
-			mac:      vxlanMAC,
-			nodeIP:   nodeIP,
-		}
-	}
-
-	// setup vxlan endpoints on every node
-	for _, node := range nodeList.Items {
-		containerID, err := p.containerIDByName(ctx, node.Name)
-		if err != nil {
-			return err
-		}
-		for otherNode, info := range nodeTunnelMap {
-			if otherNode == node.Name {
-				continue
-			}
-			_, _, err = p.executeCommandInContainer(ctx, containerID, []string{
-				"bridge", "fdb", "append", info.mac.String(), "dev", vxlanDeviceName, "dst", info.nodeIP.String(),
-			})
-			if err != nil {
-				return fmt.Errorf("appending to bridge: %w", err)
-			}
-
-			_, _, err = p.executeCommandInContainer(ctx, containerID, []string{
-				"ip", "neigh", "add", info.tunnelIP.String(), "lladdr", info.mac.String(), "dev", vxlanDeviceName, "nud", "permanent",
-			})
-			if err != nil {
-				if !isFileAlreadyExists(err) {
-					return fmt.Errorf("setting neighbor for tunnel ip: %w", err)
-				}
-			}
-
-		}
-	}
-
-	type podInfo struct {
-		NodeName string
-		Name     string
-	}
-
-	// key = podIP
-	podIPToInfo := map[string]podInfo{}
-
-	var routeErr error
-	for _, pod := range machinePodList.Items {
-		if pod.Spec.NodeName == "" {
-			return fmt.Errorf("machine pod %s is not yet scheduled", pod.Name)
-		}
-		podIPToInfo[pod.Status.PodIP] = podInfo{
-			NodeName: pod.Spec.NodeName,
-			Name:     pod.Name,
-		}
-	}
-	for podIP, info := range podIPToInfo {
-		log := klog.FromContext(ctx).WithValues("targetNode", route.TargetNode)
-
-		podName := info.Name
-		nodeName := info.NodeName
-		podIP, err := netip.ParseAddr(podIP)
-		if err != nil {
-			return err
-		}
-		destinationInfo := podIPToInfo[targetNodeInternalIP.String()]
-
-		// skip route if target node is the pod itself
-		if podIP.Compare(targetNodeInternalIP) != 0 {
-			cmd := []string{"ip", "route", "add", route.DestinationCIDR, "via", targetNodeInternalIP.String(), "dev", "eth0", "onlink"}
-			if destinationInfo.NodeName != nodeName {
-				cmd = append(cmd, "mtu", vxlanMTUSize)
-			}
-			_, _, err = p.executeCommandInPod(ctx, podName, cmd)
-			if err != nil {
-				if !isFileAlreadyExists(err) {
-					routeErr = errors.Join(routeErr, fmt.Errorf("adding route in pod %s: %w", podName, err))
-				}
-			}
-		}
-
-		containerID, err := p.containerIDByName(ctx, nodeName)
-		if err != nil {
-			return err
-		}
-		if destinationInfo.NodeName == nodeName {
-			log.Info("same node")
-
-			podLinkIndex, err := p.machinePodLinkIndex(ctx, podName)
-			if err != nil {
-				return fmt.Errorf("getting machine pod link index: %w", err)
-			}
-
-			machinePodifName, err := p.machinePodLinkName(ctx, containerID, podLinkIndex)
-			if err != nil {
-				return fmt.Errorf("getting machine pod link name: %w", err)
-			}
-
-			if err := p.ensureIPRule(ctx, containerID, machinePodifName); err != nil {
-				return fmt.Errorf("ensuring ip rule on kind node %s: %w", nodeName, err)
-			}
-
-			if err := p.ensureIPRoute(ctx, containerID, route.DestinationCIDR, targetNodeInternalIP, "", false); err != nil {
-				return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
-			}
-		} else {
-			tunnelInfo, ok := nodeTunnelMap[destinationInfo.NodeName]
-			if !ok {
-				return fmt.Errorf("tunnel map doesn't contain entry for %s", destinationInfo.NodeName)
-			}
-			log.Info("other node")
-			if err := p.ensureIPRule(ctx, containerID, vxlanDeviceName); err != nil {
-				return fmt.Errorf("ensuring vxlan ip rule on kind node %s: %w", nodeName, err)
-			}
-			if err := p.ensureIPRoute(ctx, containerID, route.DestinationCIDR, tunnelInfo.tunnelIP, vxlanDeviceName, true); err != nil {
-				return fmt.Errorf("ensuring vxlan ip route on kind node %s: %w", nodeName, err)
-			}
-		}
-	}
-
-	return routeErr
+	return p.deleteRoute(ctx, route)
 }
 
 // ListRoutes implements [cloudprovider.Routes].
 func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloudprovider.Route, error) {
-	nodeMap, err := p.nodeMap(ctx)
+	machinePods, err := p.machinePodMap(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -332,10 +73,10 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 
 	routeSet := sets.New[route]()
 
-	for nodeIP, podName := range nodeMap {
-		ipRoutes, err := p.listIPRoutes(ctx, podName)
+	for podIP, machinePodName := range machinePods {
+		ipRoutes, err := p.listIPRoutes(ctx, p.podExecutor, machinePodName)
 		if err != nil {
-			return nil, fmt.Errorf("list ip routes of pod %s: %w", podName, err)
+			return nil, fmt.Errorf("list ip routes of pod %s: %w", machinePodName, err)
 		}
 
 		nodeRouteSet := sets.New[route]()
@@ -357,23 +98,23 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 				return nil, err
 			}
 
-			targetNode, ok := nodeMap[gateway]
+			targetMachinePod, ok := machinePods[gateway]
 			if !ok {
 				if iproute.Device == "cilium_host" {
-					iproute.Gateway = nodeIP.String()
-					targetNode = podName
+					iproute.Gateway = podIP.String()
+					targetMachinePod = machinePodName
 				} else {
 					klog.Infof("gateway %s is not a live node, reporting stale route for deletion", gateway)
 				}
 			}
 			nodeRouteSet = nodeRouteSet.Insert(route{
-				Node: targetNode,
+				Node: targetMachinePod,
 				IP:   iproute.Gateway,
 				Cidr: iproute.Dest,
 			})
 		}
 
-		// intersection ensures that we only report routes that are present on all nodes.
+		// union ensures that we only report routes that are present on all nodes.
 		// Otherwise reconcile must recreate the route, so that every node has the route in it's table.
 		if routeSet.Len() == 0 {
 			routeSet = nodeRouteSet
@@ -384,7 +125,7 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 		klog.V(1).InfoS("new route set after union",
 			"routeSet", routeSet.UnsortedList(),
 			"nodeRouteSet", nodeRouteSet.UnsortedList(),
-			"node", podName)
+			"node", machinePodName)
 	}
 
 	routeList := routeSet.UnsortedList()
@@ -410,15 +151,193 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 	return cloudproviderRoutes, nil
 }
 
-// machinePodLinkIndex returns the link index of the machine pods veth pair
-func (p *Provider) machinePodLinkIndex(ctx context.Context, podName string) (int, error) {
-	stdout, _, err := p.executeCommandInPod(ctx, podName, []string{"ip", "--json", "link", "show", "eth0"})
-	if err != nil {
-		return 0, err
+func (p *Provider) deleteRoute(ctx context.Context, route *cloudprovider.Route) error {
+	// targetNode will be empty, as we do not know the target node name anymore since the node object is gone and also the pod is gone
+	if err := p.deleteRouteInMachinePods(ctx, route); err != nil {
+		return fmt.Errorf("deleting route in machine pods: %w", err)
+	}
+	if err := p.deleteRouteInKindNodes(ctx, route); err != nil {
+		return fmt.Errorf("delete route in kind nodes: %w", err)
+	}
+	return nil
+}
+
+func (p *Provider) deleteRouteInKindNodes(ctx context.Context, route *cloudprovider.Route) error {
+	nodeList := &corev1.NodeList{}
+	if err := p.RuntimeClient.List(ctx, nodeList); err != nil {
+		return err
 	}
 
-	ipLinks := []ipLink{}
-	if err := json.NewDecoder(stdout).Decode(&ipLinks); err != nil {
+	for _, node := range nodeList.Items {
+		if err := p.deleteRuleInKindNode(ctx, node.Name); err != nil {
+			return fmt.Errorf("delete rule in kind node %s: %w", node.Name, err)
+		}
+
+		if err := p.deleteIPRoute(ctx, p.containerExecutor, node.Name, route.DestinationCIDR, p.tableID); err != nil {
+			return fmt.Errorf("deleting ip route on kind node %s: %w", node.Name, err)
+		}
+	}
+	return nil
+}
+
+func (p *Provider) deleteRuleInKindNode(ctx context.Context, nodeName string) error {
+	rules, err := p.listIPRules(ctx, p.containerExecutor, nodeName, "table", p.tableID)
+	if err != nil {
+		return err
+	}
+
+	for _, r := range rules {
+		if !r.IsIIFDetached() {
+			continue
+		}
+		if err := p.deleteIPRule(ctx, p.containerExecutor, nodeName, r); err != nil {
+			return fmt.Errorf("deleting orphaned ip rule: %w", err)
+		}
+	}
+	return nil
+}
+
+func (p *Provider) deleteRouteInMachinePods(ctx context.Context, route *cloudprovider.Route) error {
+	machinePodList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.namespace)
+	if err != nil {
+		return err
+	}
+
+	for _, machine := range machinePodList.Items {
+		if err := p.deleteIPRoute(ctx, p.podExecutor, machine.Name, route.DestinationCIDR, ""); err != nil {
+			return fmt.Errorf("deleting route in machine %s: %w", machine.Name, err)
+		}
+	}
+
+	return err
+}
+
+func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) error {
+	targetNodeInternalIP, err := getNodeInternalIP(route.TargetNodeAddresses)
+	if err != nil {
+		return err
+	}
+
+	machinePodList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.namespace)
+	if err != nil {
+		return err
+	}
+
+	nodeList := &corev1.NodeList{}
+	if err := p.RuntimeClient.List(ctx, nodeList); err != nil {
+		return err
+	}
+
+	slices.SortFunc(nodeList.Items, func(a, b corev1.Node) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	nodeTunnelMap, err := p.getNodeVXLANTunnelInfos(ctx, nodeList.Items)
+	if err != nil {
+		return fmt.Errorf("getting vxlan tunnel infos from nodes: %w", err)
+	}
+
+	if err := p.ensureVXLANEndpoints(ctx, nodeTunnelMap, nodeList.Items); err != nil {
+		return fmt.Errorf("ensuring vxlan endpoints: %w", err)
+	}
+
+	type podInfo struct {
+		NodeName string
+		Name     string
+	}
+
+	// key = podIP
+	podIPToInfo := map[string]podInfo{}
+
+	var routeErr error
+	for _, pod := range machinePodList.Items {
+		if pod.Spec.NodeName == "" {
+			return fmt.Errorf("machine pod %s is not yet scheduled", pod.Name)
+		}
+		podIPToInfo[pod.Status.PodIP] = podInfo{
+			NodeName: pod.Spec.NodeName,
+			Name:     pod.Name,
+		}
+	}
+	for podIP, info := range podIPToInfo {
+		log := klog.FromContext(ctx).WithValues("targetNode", route.TargetNode)
+
+		machinePodName := info.Name
+		nodeName := info.NodeName
+		podIP, err := netip.ParseAddr(podIP)
+		if err != nil {
+			return err
+		}
+		destinationInfo := podIPToInfo[targetNodeInternalIP.String()]
+
+		// skip route if target node is the pod itself
+		if podIP.Compare(targetNodeInternalIP) != 0 {
+			var mtu string
+			if destinationInfo.NodeName != nodeName {
+				mtu = vxlanMTUSize
+			}
+			if err := p.createIPRoute(ctx, p.podExecutor, machinePodName, route.DestinationCIDR, mtu, "eth0", targetNodeInternalIP, true); err != nil {
+				return fmt.Errorf("create route in machine pod %s: %w", machinePodName, err)
+			}
+		}
+
+		if destinationInfo.NodeName == nodeName {
+			log.Info("same node")
+			if err := p.ensureRouteTargetMachineOnSameKindNode(ctx, machinePodName, nodeName, route.DestinationCIDR, targetNodeInternalIP); err != nil {
+				return fmt.Errorf("ensuring route on same kind node: %w", err)
+			}
+		} else {
+			log.Info("other node")
+			tunnelInfo, ok := nodeTunnelMap[destinationInfo.NodeName]
+			if !ok {
+				return fmt.Errorf("tunnel map doesn't contain entry for %s", destinationInfo.NodeName)
+			}
+			if err := p.ensureRouteTargetMachineOnOtherKindNode(ctx, nodeName, nodeName, route.DestinationCIDR, tunnelInfo.tunnelIP); err != nil {
+				return fmt.Errorf("ensuring route to other kind node: %w", err)
+			}
+		}
+	}
+
+	return routeErr
+}
+
+// ensureRouteToOtherKindNode sets up a route for destinationCIDR to the machine pods veth device
+func (p *Provider) ensureRouteTargetMachineOnSameKindNode(ctx context.Context, machinePodName, kindNode, destinationCIDR string, targetNodeIP netip.Addr) error {
+	podLinkIndex, err := p.machinePodLinkIndex(ctx, machinePodName)
+	if err != nil {
+		return fmt.Errorf("getting machine pod link index: %w", err)
+	}
+
+	machinePodifName, err := p.machinePodLinkName(ctx, kindNode, podLinkIndex)
+	if err != nil {
+		return fmt.Errorf("getting machine pod link name: %w", err)
+	}
+
+	if err := p.ensureIPRuleOnKindNode(ctx, kindNode, machinePodifName); err != nil {
+		return fmt.Errorf("ensuring ip rule: %w", err)
+	}
+
+	if err := p.ensureIPRouteOnKindNode(ctx, kindNode, destinationCIDR, targetNodeIP, "", false); err != nil {
+		return fmt.Errorf("ensuring ip route: %w", err)
+	}
+	return nil
+}
+
+// ensureRouteTargetMachineOnOtherKindNode sets up a route for destinationCIDR through the vxlan device for nodeName using tunnelIP of the remote kind node
+func (p *Provider) ensureRouteTargetMachineOnOtherKindNode(ctx context.Context, nodeName, kindNodeContainerID, destinationCIDR string, tunnelIP netip.Addr) error {
+	if err := p.ensureIPRuleOnKindNode(ctx, kindNodeContainerID, p.vxlanDeviceName); err != nil {
+		return fmt.Errorf("ensuring vxlan ip rule on kind node %s: %w", nodeName, err)
+	}
+	if err := p.ensureIPRouteOnKindNode(ctx, kindNodeContainerID, destinationCIDR, tunnelIP, p.vxlanDeviceName, true); err != nil {
+		return fmt.Errorf("ensuring vxlan ip route on kind node %s: %w", nodeName, err)
+	}
+	return nil
+}
+
+// machinePodLinkIndex returns the link index of the machine pods veth pair
+func (p *Provider) machinePodLinkIndex(ctx context.Context, podName string) (int, error) {
+	ipLinks, err := p.listIPLinks(ctx, p.podExecutor, podName, "eth0")
+	if err != nil {
 		return 0, err
 	}
 
@@ -431,13 +350,9 @@ func (p *Provider) machinePodLinkIndex(ctx context.Context, podName string) (int
 
 // machinePodLinkName gets the link name of the machine's pod veth pair on the node.
 // nodeContainerID is the id of the docker container running as node in the kind cluster.
-func (p *Provider) machinePodLinkName(ctx context.Context, nodeContainerID string, podLinkIndex int) (string, error) {
-	stdout, _, err := p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "--json", "link", "show"})
+func (p *Provider) machinePodLinkName(ctx context.Context, node string, podLinkIndex int) (string, error) {
+	ipLinks, err := p.listIPLinks(ctx, p.containerExecutor, node)
 	if err != nil {
-		return "", err
-	}
-	ipLinks := []ipLink{}
-	if err := json.NewDecoder(stdout).Decode(&ipLinks); err != nil {
 		return "", err
 	}
 	var ifName string
@@ -454,94 +369,9 @@ func (p *Provider) machinePodLinkName(ctx context.Context, nodeContainerID strin
 	return ifName, nil
 }
 
-// ensureIPRoute ensures an ip rule in the outer node's container for each machine pod to lookup the correct routing table
-func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, ifname string) error {
-	stdout, _, err := p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "--json", "rule", "show", "iif", ifname, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
-	if err != nil {
-		return err
-	}
-
-	rules := []ipRule{}
-	if err := json.NewDecoder(stdout).Decode(&rules); err != nil {
-		return err
-	}
-
-	// TODO: validate table ID is correct
-	if len(rules) != 0 {
-		return nil
-	}
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "rule", "add", "iif", ifname, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
-	if err != nil {
-		return err
-	}
-	return nil
-
-}
-
-// ensureIPRoute ensures an ip route in the outer node's container for each machine pod
-func (p *Provider) ensureIPRoute(ctx context.Context, nodeContainerID, destinationCIDR string, nodeIP netip.Addr, dev string, onlink bool) error {
-	cmd := []string{"ip", "route", "add", destinationCIDR, "via", nodeIP.String(), "table", strconv.Itoa(p.Config.Routes.TableID)}
-	if dev != "" {
-		cmd = append(cmd, "dev", dev)
-	}
-	if onlink {
-		cmd = append(cmd, "onlink")
-	}
-	_, _, err := p.executeCommandInContainer(ctx, nodeContainerID, cmd)
-	if err != nil {
-		if !isFileAlreadyExists(err) {
-			return err
-		}
-	}
-	return nil
-}
-
-func (p *Provider) ensureVXLANDevice(ctx context.Context, nodeContainerID, deviceName string, vni int, index int) (netip.Addr, net.HardwareAddr, error) {
-	cmd := []string{"ip", "link", "add", deviceName, "type", "vxlan", "id", strconv.Itoa(vni), "dev", "eth0", "dstport", "4789", "nolearning"}
-	_, _, err := p.executeCommandInContainer(ctx, nodeContainerID, cmd)
-	if err != nil {
-		if !isFileAlreadyExists(err) {
-			return netip.Addr{}, net.HardwareAddr{}, fmt.Errorf("creating vxlan device: %w", err)
-		}
-	}
-
-	vtepMac, err := allocateVtepMac(uint8(index))
-	if err != nil {
-		return netip.Addr{}, vtepMac, fmt.Errorf("allocating vtep mac: %w", err)
-	}
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "address", vtepMac.String()})
-	if err != nil {
-		if !isFileAlreadyExists(err) {
-			return netip.Addr{}, vtepMac, fmt.Errorf("set mac address for vxlan device: %w", err)
-		}
-	}
-
-	vtepIP, err := allocateVtepIP(index)
-	if err != nil {
-		return vtepIP, vtepMac, fmt.Errorf("allocating vtep IP: %w", err)
-	}
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "addr", "add", netip.PrefixFrom(vtepIP, 32).String(), "dev", "lo"})
-	if err != nil {
-		if !isAddressAlreadyAssigned(err) {
-			return vtepIP, vtepMac, fmt.Errorf("setting ip %s on loopback device %s: %w", vtepIP, deviceName, err)
-		}
-	}
-
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"ip", "link", "set", deviceName, "up"})
-	if err != nil {
-		return vtepIP, vtepMac, fmt.Errorf("setting vxlan device up: %w", err)
-	}
-
-	_, _, err = p.executeCommandInContainer(ctx, nodeContainerID, []string{"sysctl", "-w", fmt.Sprintf("net.ipv4.conf.%s.rp_filter=0", deviceName)})
-	if err != nil {
-		return vtepIP, vtepMac, fmt.Errorf("disable rpfilter on vxlan device: %w", err)
-	}
-
-	return vtepIP, vtepMac, nil
-}
-
-func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
-	podList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.Config.RuntimeCluster.Namespace)
+// machinePodMap returns a map keyed by the machine's pod IP mapped to it's pod name
+func (p *Provider) machinePodMap(ctx context.Context) (map[netip.Addr]string, error) {
+	podList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -557,136 +387,8 @@ func (p *Provider) nodeMap(ctx context.Context) (map[netip.Addr]string, error) {
 	return m, nil
 }
 
-type ipLink struct {
-	IfIndex   int    `json:"ifindex"`
-	LinkIndex int    `json:"link_index"`
-	IfName    string `json:"ifname"`
-	Address   string `json:"address"`
-}
-
-type ipRule struct {
-	IIF         string          `json:"iif"`
-	Table       string          `json:"table"`
-	DetachedIIF json.RawMessage `json:"iif_detached"`
-}
-
-func (r ipRule) IsIIFDetached() bool {
-	return r.DetachedIIF != nil
-}
-
-type ipRoute struct {
-	Dest    string `json:"dst"`
-	Gateway string `json:"gateway"`
-	Device  string `json:"dev"`
-}
-
-func (p *Provider) listIPRoutes(ctx context.Context, podName string) ([]ipRoute, error) {
-	cmd := []string{"ip", "--json", "route", "list"}
-	stdout, _, err := p.executeCommandInPod(ctx, podName, cmd)
-	if err != nil {
-		return nil, fmt.Errorf("get route list of container: %w", err)
-	}
-	buf := new(bytes.Buffer)
-	stdout = io.TeeReader(stdout, buf)
-	routes := []ipRoute{}
-	if err := json.NewDecoder(stdout).Decode(&routes); err != nil {
-		return nil, fmt.Errorf("decoding ip route list json output: %w", err)
-	}
-	klog.V(1).Infof("ip route output: %s", buf.String())
-	return routes, nil
-}
-
-func (p *Provider) executeCommandInPod(ctx context.Context, podName string, cmd []string) (io.Reader, io.Reader, error) {
-	klog.V(1).Infof("running command %v on pod %s", cmd, podName)
-	stdout, stderr, err := p.PodExecutor.Execute(ctx, p.Config.RuntimeCluster.Namespace, podName, "", cmd...)
-	if err != nil {
-		if exitErr, ok := errors.AsType[exec.CodeExitError](err); ok && exitErr.Exited() {
-			return nil, nil, processError{code: exitErr.Code, stderr: stderr, stdout: stdout}
-		}
-		return nil, nil, err
-	}
-	return stdout, stderr, nil
-}
-
-func (p *Provider) executeCommandInContainer(ctx context.Context, containerID string, cmd []string) (io.Reader, io.Reader, error) {
-	klog.V(1).Infof("running command %v on container %s", cmd, containerID)
-	res, err := p.DockerClient.ContainerExecCreate(ctx, containerID, container.ExecOptions{
-		Cmd:          cmd,
-		AttachStdout: true,
-		AttachStderr: true,
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("exec create: %w", err)
-	}
-
-	attachRes, err := p.DockerClient.ContainerExecAttach(ctx, res.ID, container.ExecAttachOptions{})
-	if err != nil {
-		return nil, nil, fmt.Errorf("exec attach: %w", err)
-	}
-
-	var stdout, stderr bytes.Buffer
-	_, err = stdcopy.StdCopy(&stdout, &stderr, attachRes.Reader)
-	if err != nil {
-		return nil, nil, fmt.Errorf("demultiplex output: %w", err)
-	}
-
-	inspectRes, err := p.DockerClient.ContainerExecInspect(ctx, res.ID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("exec inspect: %w", err)
-	}
-	if inspectRes.ExitCode != 0 {
-		return nil, nil, processError{code: inspectRes.ExitCode, stderr: &stderr, stdout: &stdout}
-	}
-	return &stdout, &stderr, nil
-}
-
-func (p *Provider) containerIDByName(ctx context.Context, name string) (string, error) {
-	filters := filters.NewArgs(filters.Arg("name", name))
-	containers, err := p.DockerClient.ContainerList(ctx, container.ListOptions{
-		Filters: filters,
-	})
-	if err != nil {
-		return "", err
-	}
-	if len(containers) == 0 {
-		return "", fmt.Errorf("container list returned 0 items")
-	}
-	if len(containers) == 1 {
-		return containers[0].ID, nil
-	}
-	for _, c := range containers {
-		for _, n := range c.Names {
-			n, _ := strings.CutPrefix(n, "/")
-			if n == name {
-				return c.ID, nil
-			}
-		}
-	}
-	return "", fmt.Errorf("container with name %s not found", name)
-}
-
-func allocateVtepIP(nodeIndex int) (netip.Addr, error) {
-	vtepIP := vtepIPPrefix.Addr()
-	for range nodeIndex {
-		vtepIP = vtepIP.Next()
-	}
-	if !vtepIP.IsValid() {
-		return netip.Addr{}, fmt.Errorf("getting vtep IP, allocation failed")
-	}
-	return vtepIP, nil
-}
-
-func allocateVtepMac(nodeIndex uint8) (net.HardwareAddr, error) {
-	if len(vtepMACBase) != 6 {
-		return net.HardwareAddr{}, fmt.Errorf("malformed base mac %s", vtepMACBase)
-	}
-	base := [6]byte(vtepMACBase)
-	base[5] = nodeIndex
-	return net.HardwareAddr(base[:]), nil
-}
-
-func getNodeInternalIP(node *corev1.Node) (netip.Addr, error) {
-	for _, address := range node.Status.Addresses {
+func getNodeInternalIP(nodeAddresses []corev1.NodeAddress) (netip.Addr, error) {
+	for _, address := range nodeAddresses {
 		if address.Type != corev1.NodeInternalIP {
 			continue
 		}
