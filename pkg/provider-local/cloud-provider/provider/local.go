@@ -7,6 +7,7 @@ package provider
 import (
 	"fmt"
 	"io"
+	"strconv"
 
 	dockerclient "github.com/docker/docker/client"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -103,12 +104,7 @@ func New(cfg *cloudproviderv1alpha1.CloudProviderConfig) (cloudprovider.Interfac
 			return nil, err
 		}
 
-		cloudProvider.routes = &routes.Provider{
-			Config:        cfg,
-			RuntimeClient: runtimeClient,
-			DockerClient: dockerClient,
-			PodExecutor:   kubernetes.NewPodExecutor(config),
-		}
+		cloudProvider.routes = routes.NewProvider(runtimeClient, dockerClient, kubernetes.NewPodExecutor(config), strconv.Itoa(cfg.Routes.TableID), cfg.RuntimeCluster.Namespace)
 	}
 
 	return cloudProvider, nil
