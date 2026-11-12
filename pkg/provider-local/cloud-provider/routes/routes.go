@@ -67,7 +67,7 @@ type Provider struct {
 
 // CreateRoute implements [cloudprovider.Routes].
 func (p *Provider) CreateRoute(ctx context.Context, clusterName string, nameHint string, route *cloudprovider.Route) error {
-	if err := p.modifyRoute(ctx, opCreate, route); err != nil {
+	if err := p.createRoute(ctx, route); err != nil {
 		if isFileAlreadyExists(err) {
 			klog.Info("route already exists")
 			return nil
@@ -79,7 +79,7 @@ func (p *Provider) CreateRoute(ctx context.Context, clusterName string, nameHint
 
 // DeleteRoute implements [cloudprovider.Routes].
 func (p *Provider) DeleteRoute(ctx context.Context, clusterName string, route *cloudprovider.Route) error {
-	if err := p.modifyRoute(ctx, opDelete, route); err != nil {
+	if err := p.deleteRoute(ctx, route); err != nil {
 		processErr, ok := errors.AsType[processError](err)
 		if !ok {
 			return err
@@ -97,14 +97,61 @@ func (p *Provider) DeleteRoute(ctx context.Context, clusterName string, route *c
 	return nil
 }
 
-type op string
+func (p *Provider) deleteRoute(ctx context.Context, route *cloudprovider.Route) error {
+	// targetNode will be empty, as we do not know the target node name anymore since the node object is gone and also the pod is gone
 
-const (
-	opDelete = "delete"
-	opCreate = "add"
-)
+	machinePodList, err := helper.GetMachinePods(ctx, p.RuntimeClient, p.Config.RuntimeCluster.Namespace)
+	if err != nil {
+		return err
+	}
 
-func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.Route) error {
+	nodeList := &corev1.NodeList{}
+	if err := p.RuntimeClient.List(ctx, nodeList); err != nil {
+		return err
+	}
+
+	for _, machine := range machinePodList.Items {
+		cmd := []string{"ip", "route", "delete", route.DestinationCIDR}
+		_, _, err := p.executeCommandInPod(ctx, machine.Name, cmd)
+		if err != nil && !isNoSuchProcess(err) {
+			return fmt.Errorf("deleting route on machine pod %s: %w", machine.Name, err)
+		}
+	}
+
+	for _, node := range nodeList.Items {
+		containerID, err := p.containerIDByName(ctx, node.Name)
+		if err != nil {
+			return err
+		}
+		stdout, _, err := p.executeCommandInContainer(ctx, containerID, []string{"ip", "--json", "rule", "show", "table", strconv.Itoa(p.Config.Routes.TableID)})
+		if err != nil {
+			return err
+		}
+
+		var rules []ipRule
+		if err := json.NewDecoder(stdout).Decode(&rules); err != nil {
+			return err
+		}
+
+		for _, r := range rules {
+			if !r.IsIIFDetached() {
+				continue
+			}
+			_, _, err = p.executeCommandInContainer(ctx, containerID, []string{"ip", "rule", "delete", "iif", r.IIF, "lookup", strconv.Itoa(p.Config.Routes.TableID)})
+			if err != nil {
+				return fmt.Errorf("deleting orphaned ip rule: %w", err)
+			}
+		}
+
+		_, _, err = p.executeCommandInContainer(ctx, containerID, []string{"ip", "route", "delete", route.DestinationCIDR, "table", strconv.Itoa(p.Config.Routes.TableID)})
+		if err != nil && !isNoSuchProcess(err) {
+			return fmt.Errorf("deleting ip route on kind node %s: %w", node.Name, err)
+		}
+	}
+	return nil
+}
+
+func (p *Provider) createRoute(ctx context.Context, route *cloudprovider.Route) error {
 	var targetNodeInternalIP netip.Addr
 	for _, nodeAddr := range route.TargetNodeAddresses {
 		if nodeAddr.Type != corev1.NodeInternalIP {
@@ -204,7 +251,7 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 		}
 	}
 	for podIP, info := range podIPToInfo {
-		log := klog.FromContext(ctx).WithValues("targetNode", route.TargetNode, "operation", op)
+		log := klog.FromContext(ctx).WithValues("targetNode", route.TargetNode)
 
 		podName := info.Name
 		nodeName := info.NodeName
@@ -216,11 +263,10 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 
 		// skip route if target node is the pod itself
 		if podIP.Compare(targetNodeInternalIP) != 0 {
-			cmd := []string{"ip", "route", string(op), route.DestinationCIDR, "via", targetNodeInternalIP.String(), "dev", "eth0", "onlink"}
+			cmd := []string{"ip", "route", "add", route.DestinationCIDR, "via", targetNodeInternalIP.String(), "dev", "eth0", "onlink"}
 			if destinationInfo.NodeName != nodeName {
 				cmd = append(cmd, "mtu", vxlanMTUSize)
 			}
-			log.Info("modifyRoute", "cmd", strings.Join(cmd, " "))
 			_, _, err = p.executeCommandInPod(ctx, podName, cmd)
 			if err != nil {
 				if !isFileAlreadyExists(err) {
@@ -250,7 +296,7 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 				return fmt.Errorf("ensuring ip rule on kind node %s: %w", nodeName, err)
 			}
 
-			if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, targetNodeInternalIP, "", false); err != nil {
+			if err := p.ensureIPRoute(ctx, containerID, route.DestinationCIDR, targetNodeInternalIP, "", false); err != nil {
 				return fmt.Errorf("ensuring ip route on kind node %s: %w", nodeName, err)
 			}
 		} else {
@@ -262,12 +308,10 @@ func (p *Provider) modifyRoute(ctx context.Context, op op, route *cloudprovider.
 			if err := p.ensureIPRule(ctx, containerID, vxlanDeviceName); err != nil {
 				return fmt.Errorf("ensuring vxlan ip rule on kind node %s: %w", nodeName, err)
 			}
-			if err := p.ensureIPRoute(ctx, op, containerID, route.DestinationCIDR, tunnelInfo.tunnelIP, vxlanDeviceName, true); err != nil {
+			if err := p.ensureIPRoute(ctx, containerID, route.DestinationCIDR, tunnelInfo.tunnelIP, vxlanDeviceName, true); err != nil {
 				return fmt.Errorf("ensuring vxlan ip route on kind node %s: %w", nodeName, err)
 			}
-
 		}
-
 	}
 
 	return routeErr
@@ -320,7 +364,6 @@ func (p *Provider) ListRoutes(ctx context.Context, clusterName string) ([]*cloud
 					targetNode = podName
 				} else {
 					klog.Infof("gateway %s is not a live node, reporting stale route for deletion", gateway)
-					targetNode = gateway.String()
 				}
 			}
 			nodeRouteSet = nodeRouteSet.Insert(route{
@@ -436,12 +479,8 @@ func (p *Provider) ensureIPRule(ctx context.Context, nodeContainerID, ifname str
 }
 
 // ensureIPRoute ensures an ip route in the outer node's container for each machine pod
-func (p *Provider) ensureIPRoute(ctx context.Context, op op, nodeContainerID, destinationCIDR string, nodeIP netip.Addr, dev string, onlink bool) error {
-	cmd := []string{"ip", "route", string(op), destinationCIDR}
-	if nodeIP.IsValid() {
-		cmd = append(cmd, "via", nodeIP.String())
-	}
-	cmd = append(cmd, "table", strconv.Itoa(p.Config.Routes.TableID))
+func (p *Provider) ensureIPRoute(ctx context.Context, nodeContainerID, destinationCIDR string, nodeIP netip.Addr, dev string, onlink bool) error {
+	cmd := []string{"ip", "route", "add", destinationCIDR, "via", nodeIP.String(), "table", strconv.Itoa(p.Config.Routes.TableID)}
 	if dev != "" {
 		cmd = append(cmd, "dev", dev)
 	}
@@ -526,8 +565,13 @@ type ipLink struct {
 }
 
 type ipRule struct {
-	IIF   string `json:"iif"`
-	Table string `json:"table"`
+	IIF         string          `json:"iif"`
+	Table       string          `json:"table"`
+	DetachedIIF json.RawMessage `json:"iif_detached"`
+}
+
+func (r ipRule) IsIIFDetached() bool {
+	return r.DetachedIIF != nil
 }
 
 type ipRoute struct {

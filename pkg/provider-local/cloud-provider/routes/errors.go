@@ -60,3 +60,16 @@ func isAddressAlreadyAssigned(err error) bool {
 	}
 	return strings.Contains(strings.TrimSpace(string(stdout)), "Address already assigned")
 }
+
+func isNoSuchProcess(err error) bool {
+	processErr, ok := errors.AsType[processError](err)
+	if !ok {
+		return false
+	}
+	stdout, err := processErrorStderr(&processErr)
+	if err != nil {
+		return false
+	}
+
+	return strings.TrimSpace(string(stdout)) == "RTNETLINK answers: No such process"
+}
