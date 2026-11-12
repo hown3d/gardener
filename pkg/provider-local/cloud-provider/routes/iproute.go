@@ -61,8 +61,11 @@ func (p *Provider) listIPRoutes(ctx context.Context, exec executor, name string)
 	return routes, nil
 }
 
-func (p *Provider) createIPRoute(ctx context.Context, exec executor, name, destinationCIDR, mtu, device string, gatewayIP netip.Addr, onlink bool) error {
+func (p *Provider) createIPRoute(ctx context.Context, exec executor, name, destinationCIDR, mtu, device, tableID string, gatewayIP netip.Addr, onlink bool) error {
 	cmd := []string{"ip", "route", "add", destinationCIDR, "via", gatewayIP.String()}
+	if tableID != "" {
+		cmd = append(cmd, "table", tableID)
+	}
 	if mtu != "" {
 		cmd = append(cmd, "mtu", mtu)
 	}
@@ -141,5 +144,5 @@ func (p *Provider) ensureIPRuleOnKindNode(ctx context.Context, kindNode, ifname 
 
 // ensureIPRouteOnKindNode ensures an ip route in the outer node's container for each machine pod
 func (p *Provider) ensureIPRouteOnKindNode(ctx context.Context, kindNode, destinationCIDR string, nodeIP netip.Addr, dev string, onlink bool) error {
-	return p.createIPRoute(ctx, p.containerExecutor, kindNode, destinationCIDR, "", dev, nodeIP, onlink)
+	return p.createIPRoute(ctx, p.containerExecutor, kindNode, destinationCIDR, "", dev, p.tableID, nodeIP, onlink)
 }
