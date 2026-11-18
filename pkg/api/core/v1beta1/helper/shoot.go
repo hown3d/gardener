@@ -5,6 +5,7 @@
 package helper
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strconv"
@@ -974,4 +975,23 @@ func RemoveOperation(operations []string, operationsToRemove ...string) []string
 	return slices.DeleteFunc(operations, func(operation string) bool {
 		return slices.Contains(operationsToRemove, operation)
 	})
+}
+
+func IsShootUsingOverlay(network *gardencorev1beta1.Networking) bool {
+	// overlay is enabled by default
+	if network.ProviderConfig == nil {
+		return true
+	}
+
+	type networkConfig struct {
+		Overlay struct {
+			Enabled bool `json:"false"`
+		} `json:"overlay"`
+	}
+
+	var conf networkConfig
+	if err := json.Unmarshal(network.ProviderConfig.Raw, &conf); err != nil {
+		return true
+	}
+	return conf.Overlay.Enabled
 }

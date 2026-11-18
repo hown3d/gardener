@@ -94,17 +94,20 @@ func New(cfg *cloudproviderv1alpha1.CloudProviderConfig) (cloudprovider.Interfac
 			RuntimeClient: runtimeClient,
 		}
 
-		clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
-			&clientcmd.ClientConfigLoadingRules{ExplicitPath: ptr.Deref(cfg.RuntimeCluster.Kubeconfig, "")},
-			&clientcmd.ConfigOverrides{},
-		)
+		if cfg.Routes.TableID != 0 {
+			clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+				&clientcmd.ClientConfigLoadingRules{ExplicitPath: ptr.Deref(cfg.RuntimeCluster.Kubeconfig, "")},
+				&clientcmd.ConfigOverrides{},
+			)
 
-		config, err := clientConfig.ClientConfig()
-		if err != nil {
-			return nil, err
+			config, err := clientConfig.ClientConfig()
+			if err != nil {
+				return nil, err
+			}
+
+			cloudProvider.routes = routes.NewProvider(runtimeClient, dockerClient, kubernetes.NewPodExecutor(config), strconv.Itoa(cfg.Routes.TableID), cfg.RuntimeCluster.Namespace)
 		}
 
-		cloudProvider.routes = routes.NewProvider(runtimeClient, dockerClient, kubernetes.NewPodExecutor(config), strconv.Itoa(cfg.Routes.TableID), cfg.RuntimeCluster.Namespace)
 	}
 
 	return cloudProvider, nil
@@ -180,4 +183,4 @@ func (l *Local) Zones() (cloudprovider.Zones, bool) { return nil, false }
 func (l *Local) Clusters() (cloudprovider.Clusters, bool) { return nil, false }
 
 // Routes returns a routes interface along with whether the interface is supported.
-func (l *Local) Routes() (cloudprovider.Routes, bool) { return l.routes, true }
+func (l *Local) Routes() (cloudprovider.Routes, bool) { return l.routes, l.routes != nil }

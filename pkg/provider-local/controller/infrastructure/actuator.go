@@ -6,7 +6,6 @@ package infrastructure
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -18,6 +17,7 @@ import (
 
 	extensionscontroller "github.com/gardener/gardener/extensions/pkg/controller"
 	"github.com/gardener/gardener/extensions/pkg/controller/infrastructure"
+	v1beta1helper "github.com/gardener/gardener/pkg/api/core/v1beta1/helper"
 	gardencorev1beta1 "github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
@@ -51,7 +51,7 @@ func (a *actuator) Reconcile(ctx context.Context, _ logr.Logger, infrastructure 
 
 	ipPools := []client.Object{}
 	for _, ipFamily := range cluster.Shoot.Spec.Networking.IPFamilies {
-		ipPoolObj, err := ipPool(machineNamespace, cluster.Shoot.Status.TechnicalID, string(ipFamily), *cluster.Shoot.Spec.Networking.Nodes, isShootUsingOverlay(cluster.Shoot.Spec.Networking))
+		ipPoolObj, err := ipPool(machineNamespace, cluster.Shoot.Status.TechnicalID, string(ipFamily), *cluster.Shoot.Spec.Networking.Nodes, v1beta1helper.IsShootUsingOverlay(cluster.Shoot.Spec.Networking))
 		if err != nil {
 			return err
 		}
@@ -164,23 +164,4 @@ spec:
 		UID:        machineNamespace.UID,
 	}})
 	return obj, nil
-}
-
-func isShootUsingOverlay(network *gardencorev1beta1.Networking) bool {
-	// overlay is enabled by default
-	if network.ProviderConfig == nil {
-		return true
-	}
-
-	type networkConfig struct {
-		Overlay struct {
-			Enabled bool `json:"false"`
-		} `json:"overlay"`
-	}
-
-	var conf networkConfig
-	if err := json.Unmarshal(network.ProviderConfig.Raw, &conf); err != nil {
-		return true
-	}
-	return conf.Overlay.Enabled
 }

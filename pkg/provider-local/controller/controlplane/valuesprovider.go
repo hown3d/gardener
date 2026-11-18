@@ -19,6 +19,7 @@ import (
 	"github.com/gardener/gardener/extensions/pkg/controller/controlplane/genericactuator"
 	extensionssecretsmanager "github.com/gardener/gardener/extensions/pkg/util/secret/manager"
 	v1beta1helper "github.com/gardener/gardener/pkg/api/core/v1beta1/helper"
+	"github.com/gardener/gardener/pkg/apis/core/v1beta1"
 	v1beta1constants "github.com/gardener/gardener/pkg/apis/core/v1beta1/constants"
 	extensionsv1alpha1 "github.com/gardener/gardener/pkg/apis/extensions/v1alpha1"
 	"github.com/gardener/gardener/pkg/provider-local/apis/local/v1alpha1/helper"
@@ -174,19 +175,18 @@ func (vp *valuesProvider) GetConfigChartValues(
 		}
 	}
 
-	h := sha256.Sum256([]byte(cluster.Shoot.UID))
-	hash64 := binary.NativeEndian.Uint64(h[:])
-	hash20 := hash64 & 0xFFFFF
-
-	return map[string]any{
+	m := map[string]any{
 		"runtimeCluster": runtimeCluster,
 		"loadBalancer": map[string]any{
 			"image": config.LoadBalancer.Image,
 		},
-		"routes": map[string]any{
-			"tableID": hash20,
-		},
-	}, nil
+	}
+	if !v1beta1helper.IsShootUsingOverlay(cluster.Shoot.Spec.Networking) {
+		m["routes"] = map[string]any{
+			"tableID": routingTableID(cluster.Shoot),
+		}
+	}
+	return m, nil
 }
 
 // GetControlPlaneChartValues returns the values for the control plane chart applied by the generic actuator.
@@ -237,4 +237,11 @@ func (vp *valuesProvider) GetControlPlaneShootChartValues(
 	_ map[string]string,
 ) (map[string]any, error) {
 	return map[string]any{}, nil
+}
+
+func routingTableID(shoot *v1beta1.Shoot) uint64 {
+	h := sha256.Sum256([]byte(shoot.UID))
+	hash64 := binary.NativeEndian.Uint64(h[:])
+	hash20 := hash64 & 0xFFFFF
+	return hash20
 }
